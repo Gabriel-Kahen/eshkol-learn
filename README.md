@@ -1,6 +1,6 @@
 # eshkol.learn
 
-`eshkol.learn` is a small, Eshkol-native learning library for tabular ML,
+`eshkol.learn` is an Eshkol-native learning library for tabular ML,
 scientific fitting, geometry-aware training, and reproducible experiment
 records. It is meant to compose Eshkol's existing runtime features rather than
 replace them: CSV/dataframe loading, vectors, native autodiff where it works,
