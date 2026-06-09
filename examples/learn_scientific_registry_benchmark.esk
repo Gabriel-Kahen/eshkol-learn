@@ -1,0 +1,116 @@
+(require learn)
+
+(define ts
+  (time-series-dataset '(0.0 1.0 2.0 3.0)
+                       '(1.0 3.0 5.0 7.0)
+                       ':name 'linear-simulator))
+
+(define ss
+  (state-space-dataset '(0.0 1.0 2.0)
+                       (list (vector 1.0)
+                             (vector 3.0)
+                             (vector 5.0))
+                       ':name 'linear-state))
+
+(define ts-manifest
+  (time-series-manifest
+   'linear-simulator-series
+   ts
+   ':schema (list (shape-schema 'time '(*) )
+                  (shape-schema 'value '(*) )
+                  (parameter-schema '(offset slope)
+                                    (vector 0.0 0.0)))
+   ':tags '(scientific-learning qgtl selene moonlab)))
+
+(define ss-manifest
+  (state-space-manifest
+   'linear-state-space
+   ss
+   ':tags '(ode simulator moonlab-ready)))
+
+(define run
+  (start-run "scientific-registry"
+             ':run-id "tsotchke-demo"
+             ':seed 42))
+
+(log-dataset-manifest run ts-manifest)
+(log-dataset-manifest run ss-manifest)
+
+(define lineage
+  (run-lineage "tsotchke-demo"
+               '("linear-simulator-baseline")
+               ':dataset 'linear-simulator-series
+               ':backend 'aot
+               ':purpose 'compiler-backend-parity
+               ':tags '(eshkol-native tsotchke-thesis)))
+
+(log-run-lineage run lineage)
+
+(define aot-backend
+  (compiler-backend 'aot 'aot
+                    ':capabilities '(compiler-comparison scientific-learning)))
+(define jit-backend
+  (compiler-backend 'jit 'jit
+                    ':capabilities '(compiler-comparison scientific-learning)))
+(define moonlab-backend
+  (simulator-learn-backend
+   'moonlab-prototype
+   ':capabilities '(simulator scientific-learning qgtl-prototype)))
+
+(define slope-case
+  (benchmark-case
+   'linear-slope-estimate
+   (lambda (backend opts)
+     (vector-ref (time-series-linear-params ts) 1))
+   ':expected 2.0
+   ':dataset-manifest ts-manifest
+   ':repeats 2
+   ':tags '(aot-jit-parity simulator-parity)))
+
+(define comparison
+  (compare-backends slope-case
+                    (list aot-backend jit-backend moonlab-backend)))
+
+(log-benchmark-result run comparison)
+
+(define suite
+  (benchmark-suite 'thesis-scientific-suite
+                   (list slope-case)
+                   ':tags '(qgtl selene moonlab neo-millennium)))
+(define suite-results
+  (run-benchmark-suite suite
+                       (list aot-backend jit-backend moonlab-backend)))
+(define report (benchmark-report suite suite-results))
+
+(define registry
+  (experiment-registry 'tsotchke-scientific-learning
+                       ':scope 'scientific-learning
+                       ':thesis 'qgtl-selene-moonlab))
+(registry-add-dataset! registry ts-manifest)
+(registry-add-dataset! registry ss-manifest)
+(registry-add-lineage! registry lineage)
+(registry-add-backend! registry aot-backend)
+(registry-add-backend! registry jit-backend)
+(registry-add-backend! registry moonlab-backend)
+(registry-add-benchmark! registry comparison)
+(registry-add-run! registry (run-summary run))
+
+(define registry-path
+  (string-append (learn-alist-get (run-summary run) 'dir "")
+                 "/registry-summary.json"))
+(write-registry-summary registry registry-path)
+
+(display "registry summary: ")
+(display (registry-summary registry))
+(newline)
+
+(display "benchmark report: ")
+(display report)
+(newline)
+
+(display "registry artifact: ")
+(display registry-path)
+(newline)
+
+(display (replay-run run)) (newline)
+(end-run run)

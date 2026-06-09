@@ -1,0 +1,63 @@
+(require learn)
+(require core.argparse)
+(require core.logging)
+(require core.plot)
+(require core.json)
+
+(define spec
+  (list (list '--seed 'integer 123 "Deterministic split seed")
+        (list '--epochs 'integer 150 "Training epochs")
+        (list '--quiet 'boolean #f "Suppress terminal charts")))
+(define args (parse-args (cdr (command-line)) spec))
+(define seed (arg-get args '--seed))
+(define epochs (arg-get args '--epochs))
+(define quiet? (arg-get args '--quiet))
+
+(define ds
+  (csv-dataset "fixtures/learn_benchmark_tabular.csv"
+               '("x1" "x2" "x3")
+               "label"))
+(define diagnostics (validate-dataset ds ':features 3))
+(define split
+  (train-valid-test-split (dataset-x ds) (dataset-y ds)
+                          ':valid-ratio 0.25
+                          ':test-ratio 0.25
+                          ':seed seed))
+(define run (start-run "cookbook" ':seed seed))
+(define model (logistic-regressor ':lr 0.2 ':epochs epochs))
+(define valid-x (car (cdr (cdr split))))
+(define valid-y (car (cdr (cdr (cdr split)))))
+(define test-x (car (cdr (cdr (cdr (cdr split))))))
+(define test-y (car (cdr (cdr (cdr (cdr (cdr split)))))))
+
+(log-info "learn cookbook start"
+          (list (list "seed" seed)
+                (list "samples" (learn-alist-get diagnostics 'samples 0))
+                (list "features" (learn-alist-get diagnostics 'features 0))))
+(log-param run "model" "logistic-regressor")
+(log-param run "epochs" epochs)
+(log-param run "seed" seed)
+
+(fit model (car split) (car (cdr split)))
+(define valid-score (score model valid-x valid-y))
+(define test-score (score model test-x test-y))
+(log-metric run "valid_accuracy" valid-score ':step epochs)
+(log-metric run "test_accuracy" test-score ':step epochs)
+
+(if (not quiet?)
+    (begin
+      (display "accuracy sparkline: ")
+      (display (sparkline (list 0.5 valid-score test-score)))
+      (newline)
+      (bar-chart (list (list "valid" valid-score)
+                       (list "test" test-score)))))
+
+(define report (make-hash-table))
+(hash-set! report "samples" (learn-alist-get diagnostics 'samples 0))
+(hash-set! report "features" (learn-alist-get diagnostics 'features 0))
+(hash-set! report "valid_accuracy" valid-score)
+(hash-set! report "test_accuracy" test-score)
+(hash-set! report "run_dir" (learn-alist-get (run-summary run) 'dir ""))
+(display (json-stringify report)) (newline)
+(display (replay-run run)) (newline)
+(end-run run)

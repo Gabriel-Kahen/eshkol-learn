@@ -1,0 +1,91 @@
+;;; learn/experiment.esk
+;;;
+;;; Local run-directory experiment management.
+
+(require learn.core)
+(require learn.protocols)
+
+(provide start-run end-run log-param log-metric log-artifact
+         run-summary compare-runs replay-run)
+
+(define (learn-run-id)
+  (number->string (current-time-ms)))
+
+(define (learn-path-join a b)
+  (string-append a "/" b))
+
+(define (learn-json-escape-string s)
+  s)
+
+(define (learn-json-value value)
+  (cond
+    ((string? value) (string-append "\"" (learn-json-escape-string value) "\""))
+    ((number? value) (number->string value))
+    ((boolean? value) (if value "true" "false"))
+    ((null? value) "null")
+    ((symbol? value) (string-append "\"" (symbol->string value) "\""))
+    (else "\"#<value>\"")))
+
+(define (start-run experiment-name . opts)
+  (let* ((root (learn-option opts ':root "runs"))
+         (seed (learn-option opts ':seed #f))
+         (run-id (learn-option opts ':run-id (learn-run-id)))
+         (experiment-dir (learn-path-join root experiment-name))
+         (run-dir (learn-path-join experiment-dir run-id)))
+    (mkdir-recursive run-dir)
+    (let ((ctx (learn-make-run-context experiment-name run-dir seed '())))
+      (log-param ctx "experiment" experiment-name)
+      (log-param ctx "run_id" run-id)
+      (if seed (log-param ctx "seed" seed))
+      ctx)))
+
+(define (end-run ctx)
+  (let ((path (learn-path-join (run-context-dir ctx) "status.txt")))
+    (write-file path "completed\n")
+    ctx))
+
+(define (learn-json-line key value)
+  (string-append "{\"key\":"
+                 (learn-json-value key)
+                 ",\"value\":"
+                 (learn-json-value value)
+                 "}\n"))
+
+(define (log-param ctx key value)
+  (append-file (learn-path-join (run-context-dir ctx) "params.jsonl")
+               (learn-json-line key value))
+  ctx)
+
+(define (log-metric ctx key value . opts)
+  (append-file (learn-path-join (run-context-dir ctx) "metrics.jsonl")
+               (string-append "{\"key\":"
+                              (learn-json-value key)
+                              ",\"value\":"
+                              (learn-json-value value)
+                              ",\"step\":"
+                              (learn-json-value (learn-option opts ':step #f))
+                              "}\n"))
+  ctx)
+
+(define (log-artifact ctx name path)
+  (append-file (learn-path-join (run-context-dir ctx) "artifacts.txt")
+               (string-append name "\t" path "\n"))
+  ctx)
+
+(define (run-summary ctx)
+  (list (learn-pair 'name (run-context-name ctx))
+        (learn-pair 'dir (run-context-dir ctx))
+        (learn-pair 'seed (run-context-seed ctx))
+        (learn-pair 'params-file (learn-path-join (run-context-dir ctx) "params.jsonl"))
+        (learn-pair 'metrics-file (learn-path-join (run-context-dir ctx) "metrics.jsonl"))))
+
+(define (compare-runs runs)
+  (map run-summary runs))
+
+(define (replay-run ctx)
+  (let ((script (learn-path-join (run-context-dir ctx) "replay.esk")))
+    (write-file script
+                (string-append ";; Replay scaffold for "
+                               (run-context-name ctx)
+                               "\n;; Inspect manifest files in this run directory.\n"))
+    script))

@@ -1,0 +1,22 @@
+(require learn)
+
+(define (main)
+  (define x '((0.0 0.0)
+              (0.0 1.0)
+              (1.0 0.0)
+              (1.0 1.0)))
+  (define y '(0 1 1 0))
+
+  (define model
+    (make-pipeline
+     (standard-scaler)
+     (mlp-classifier ':layers '(2 4 1)
+                     ':lr 0.5
+                     ':epochs 1500
+                     ':seed 42)))
+
+  (fit model x y)
+  (display "predictions: ") (display (predict model x)) (newline)
+  (display "accuracy: ") (display (score model x y)) (newline))
+
+(main)

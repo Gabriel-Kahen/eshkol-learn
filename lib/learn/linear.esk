@@ -1,0 +1,281 @@
+;;; learn/linear.esk
+;;;
+;;; Small tabular linear and logistic estimators.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.metrics)
+
+(provide linear-regressor logistic-regressor)
+
+(define (learn-linear-row row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-linear-rows x)
+  (map learn-linear-row (learn-seq->list x)))
+
+(define (learn-linear-zero-list n)
+  (if (<= n 0) '() (cons 0.0 (learn-linear-zero-list (- n 1)))))
+
+(define (learn-linear-predict-one weights bias row)
+  (+ (learn-dot weights (learn-linear-row row)) bias))
+
+(define (learn-linear-predict-list weights bias rows)
+  (if (null? rows)
+      '()
+      (cons (learn-linear-predict-one weights bias (car rows))
+            (learn-linear-predict-list weights bias (cdr rows)))))
+
+(define (learn-linear-state-weights state context)
+  (if (and (vector? state) (>= (vector-length state) 4))
+      (vector-ref state 1)
+      (error context "estimator is not fitted")))
+
+(define (learn-linear-state-bias state context)
+  (if (and (vector? state) (>= (vector-length state) 4))
+      (vector-ref state 2)
+      (error context "estimator is not fitted")))
+
+(define (learn-linear-state-width state context)
+  (if (and (vector? state) (>= (vector-length state) 4))
+      (vector-ref state 3)
+      (error context "estimator is not fitted")))
+
+(define (learn-linear-predict-list-checked weights bias n rows)
+  (if (null? rows)
+      '()
+      (cons (learn-linear-predict-one
+             weights
+             bias
+             (learn-validate-row-width (learn-linear-row (car rows))
+                                       n
+                                       "linear-regressor predict"))
+            (learn-linear-predict-list-checked weights bias n (cdr rows)))))
+
+(define (learn-linear-update-weights weights row err lr)
+  (if (or (null? weights) (null? row))
+      '()
+      (cons (- (car weights) (* lr 2.0 err (car row)))
+            (learn-linear-update-weights (cdr weights) (cdr row) err lr))))
+
+(define (learn-linear-fit-epoch rows ys weights bias lr)
+  (if (or (null? rows) (null? ys))
+      (list weights bias)
+      (let* ((row (learn-linear-row (car rows)))
+             (pred (learn-linear-predict-one weights bias row))
+             (err (- pred (car ys)))
+             (new-weights (learn-linear-update-weights weights row err lr))
+             (new-bias (- bias (* lr 2.0 err))))
+        (learn-linear-fit-epoch (cdr rows) (cdr ys) new-weights new-bias lr))))
+
+(define (learn-linear-fit-loop rows ys weights bias lr epoch epochs)
+  (if (>= epoch epochs)
+      (list weights bias)
+      (let ((next (learn-linear-fit-epoch rows ys weights bias lr)))
+        (learn-linear-fit-loop rows ys
+                               (car next)
+                               (car (cdr next))
+                               lr
+                               (+ epoch 1)
+                               epochs))))
+
+(define (learn-linear-fit estimator x y opts)
+  (let* ((rows (learn-linear-rows x))
+         (ys (learn-seq->list y))
+         (n (learn-validate-rectangular-rows rows "linear-regressor fit"))
+         (lr (learn-alist-get (learn-estimator-params estimator) ':lr 0.01))
+         (epochs (learn-alist-get (learn-estimator-params estimator) ':epochs 100))
+         (initial-weights (learn-linear-zero-list n))
+         (result (learn-linear-fit-loop rows ys initial-weights 0.0 lr 0 epochs)))
+    (if (not (= (length rows) (length ys)))
+        (error "linear-regressor fit" "x/y length mismatch" (length rows) (length ys)))
+    (learn-fitted-estimator-like
+     estimator
+     (vector 'linear-regressor-state
+             (learn-list->vector (car result))
+             (car (cdr result))
+             n))))
+
+(define (learn-linear-predict estimator x opts)
+  (let* ((state (learn-estimator-state estimator))
+         (weights (learn-seq->list
+                   (learn-linear-state-weights state "linear-regressor predict")))
+         (bias (learn-linear-state-bias state "linear-regressor predict"))
+         (n (learn-linear-state-width state "linear-regressor predict")))
+    (learn-linear-predict-list-checked weights bias n (learn-seq->list x))))
+
+(define (learn-linear-score estimator x y opts)
+  (r2-score y (learn-linear-predict estimator x opts)))
+
+(define (linear-regressor . opts)
+  (learn-make-estimator
+   'linear-regressor
+   (list (learn-pair 'fit learn-linear-fit)
+         (learn-pair 'predict learn-linear-predict)
+         (learn-pair 'score learn-linear-score))
+   (list (learn-pair ':lr (learn-option opts ':lr 0.01))
+         (learn-pair ':epochs (learn-option opts ':epochs 100)))
+   '()))
+
+(define (learn-linear-load params state fitted?)
+  (let ((est (linear-regressor)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (vector 'linear-regressor-state
+                   (list->vector (list-ref state 1))
+                   (list-ref state 2)
+                   (list-ref state 3)))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(define (learn-sigmoid z)
+  (/ 1.0 (+ 1.0 (exp (- z)))))
+
+(define (learn-logistic-classes ys)
+  (let ((classes (learn-unique ys)))
+    (if (null? (cdr classes))
+        (list (car classes) (car classes))
+        classes)))
+
+(define (learn-logistic-positive classes)
+  (if (null? (cdr classes)) (car classes) (car (cdr classes))))
+
+(define (learn-logistic-target y classes)
+  (if (equal? y (learn-logistic-positive classes)) 1.0 0.0))
+
+(define (learn-logistic-update-weights weights row err lr)
+  (if (or (null? weights) (null? row))
+      '()
+      (cons (- (car weights) (* lr err (car row)))
+            (learn-logistic-update-weights (cdr weights) (cdr row) err lr))))
+
+(define (learn-logistic-fit-epoch rows ys classes weights bias lr)
+  (if (or (null? rows) (null? ys))
+      (list weights bias)
+      (let* ((row (learn-linear-row (car rows)))
+             (prob (learn-sigmoid (learn-linear-predict-one weights bias row)))
+             (target (learn-logistic-target (car ys) classes))
+             (err (- prob target))
+             (new-weights (learn-logistic-update-weights weights row err lr))
+             (new-bias (- bias (* lr err))))
+        (learn-logistic-fit-epoch (cdr rows) (cdr ys) classes
+                                  new-weights new-bias lr))))
+
+(define (learn-logistic-fit-loop rows ys classes weights bias lr epoch epochs)
+  (if (>= epoch epochs)
+      (list weights bias)
+      (let ((next (learn-logistic-fit-epoch rows ys classes weights bias lr)))
+        (learn-logistic-fit-loop rows ys classes
+                                 (car next)
+                                 (car (cdr next))
+                                 lr
+                                 (+ epoch 1)
+                                 epochs))))
+
+(define (learn-logistic-fit estimator x y opts)
+  (let* ((rows (learn-linear-rows x))
+         (ys (learn-seq->list y))
+         (classes (learn-logistic-classes ys))
+         (n (learn-validate-rectangular-rows rows "logistic-regressor fit"))
+         (lr (learn-alist-get (learn-estimator-params estimator) ':lr 0.05))
+         (epochs (learn-alist-get (learn-estimator-params estimator) ':epochs 100))
+         (result (learn-logistic-fit-loop rows ys classes
+                                          (learn-linear-zero-list n)
+                                          0.0 lr 0 epochs)))
+    (if (not (= (length rows) (length ys)))
+        (error "logistic-regressor fit" "x/y length mismatch" (length rows) (length ys)))
+    (learn-fitted-estimator-like
+     estimator
+     (vector 'logistic-regressor-state
+             (learn-list->vector (car result))
+             (car (cdr result))
+             (learn-list->vector classes)
+             n))))
+
+(define (learn-logistic-state-classes state context)
+  (if (and (vector? state) (>= (vector-length state) 5))
+      (learn-seq->list (vector-ref state 3))
+      (error context "estimator is not fitted")))
+
+(define (learn-logistic-state-width state context)
+  (if (and (vector? state) (>= (vector-length state) 5))
+      (vector-ref state 4)
+      (error context "estimator is not fitted")))
+
+(define (learn-logistic-proba-one estimator row)
+  (let* ((state (learn-estimator-state estimator))
+         (weights (learn-seq->list
+                   (learn-linear-state-weights state "logistic-regressor predict")))
+         (bias (learn-linear-state-bias state "logistic-regressor predict"))
+         (n (learn-logistic-state-width state "logistic-regressor predict"))
+         (checked-row (learn-validate-row-width (learn-linear-row row)
+                                                n
+                                                "logistic-regressor predict")))
+    (learn-sigmoid (learn-linear-predict-one weights bias checked-row))))
+
+(define (learn-logistic-predict-list estimator rows threshold positive negative)
+  (if (null? rows)
+      '()
+      (cons (if (>= (learn-logistic-proba-one estimator (car rows)) threshold)
+                positive
+                negative)
+            (learn-logistic-predict-list estimator (cdr rows)
+                                         threshold positive negative))))
+
+(define (learn-logistic-predict estimator x opts)
+  (let* ((classes (learn-logistic-state-classes
+                   (learn-estimator-state estimator)
+                   "logistic-regressor predict"))
+         (negative (car classes))
+         (positive (learn-logistic-positive classes))
+         (threshold (learn-alist-get (learn-estimator-params estimator) ':threshold 0.5)))
+    (learn-logistic-predict-list estimator (learn-seq->list x)
+                                 threshold positive negative)))
+
+(define (learn-logistic-score estimator x y opts)
+  (accuracy y (learn-logistic-predict estimator x opts)))
+
+(define (learn-logistic-predict-proba estimator x opts)
+  (learn-logistic-proba-list estimator (learn-seq->list x)))
+
+(define (learn-logistic-proba-list estimator rows)
+  (if (null? rows)
+      '()
+      (cons (learn-logistic-proba-one estimator (car rows))
+            (learn-logistic-proba-list estimator (cdr rows)))))
+
+(define (logistic-regressor . opts)
+  (learn-make-estimator
+   'logistic-regressor
+   (list (learn-pair 'fit learn-logistic-fit)
+         (learn-pair 'predict learn-logistic-predict)
+         (learn-pair 'score learn-logistic-score)
+         (learn-pair 'predict-proba learn-logistic-predict-proba))
+   (list (learn-pair ':lr (learn-option opts ':lr 0.05))
+         (learn-pair ':epochs (learn-option opts ':epochs 100))
+         (learn-pair ':threshold (learn-option opts ':threshold 0.5)))
+   '()))
+
+(define (learn-logistic-load params state fitted?)
+  (let ((est (logistic-regressor)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (vector 'logistic-regressor-state
+                   (list->vector (list-ref state 1))
+                   (list-ref state 2)
+                   (list->vector (list-ref state 3))
+                   (list-ref state 4)))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(register-estimator-loader 'linear-regressor learn-linear-load)
+(register-estimator-loader 'logistic-regressor learn-logistic-load)

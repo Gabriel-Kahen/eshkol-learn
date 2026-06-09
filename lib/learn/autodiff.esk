@@ -1,0 +1,266 @@
+;;; learn/autodiff.esk
+;;;
+;;; Native-autodiff losses and small layer/model primitives.
+
+(require learn.core)
+
+(provide tensor-mse-loss tensor-mae-loss tensor-binary-cross-entropy
+         tensor-l2-regularization
+         dense-layer activation-layer sequential-model
+         learn-layer? learn-layer-kind learn-layer-params
+         learn-model? learn-model-layers
+         layer-param-count model-param-count model-zero-params
+         model-init-params model-forward model-predict
+         model-mse-loss model-binary-cross-entropy-loss)
+
+(define learn-layer-tag 'learn-layer)
+(define learn-model-tag 'learn-model)
+
+(define (learn-tensor-row row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-loss-squared-errors y-true y-pred)
+  (learn-map2 (lambda (a b) (* (- b a) (- b a)))
+              (learn-tensor-row y-true)
+              (learn-tensor-row y-pred)))
+
+(define (tensor-mse-loss y-true y-pred)
+  (learn-list-mean (learn-loss-squared-errors y-true y-pred)))
+
+(define (tensor-mae-loss y-true y-pred)
+  (learn-list-mean
+   (learn-map2 (lambda (a b) (abs (- b a)))
+               (learn-tensor-row y-true)
+               (learn-tensor-row y-pred))))
+
+(define (learn-loss-clamp x lo hi)
+  (max lo (min hi x)))
+
+(define (learn-bce-terms y-true y-prob eps)
+  (learn-map2
+   (lambda (y p)
+     (let ((pc (learn-loss-clamp p eps (- 1.0 eps))))
+       (- 0.0
+          (+ (* y (log pc))
+             (* (- 1.0 y) (log (- 1.0 pc)))))))
+   (learn-tensor-row y-true)
+   (learn-tensor-row y-prob)))
+
+(define (tensor-binary-cross-entropy y-true y-prob . opts)
+  (learn-list-mean
+   (learn-bce-terms y-true
+                    y-prob
+                    (learn-option opts ':eps 0.0000001))))
+
+(define (tensor-l2-regularization values . opts)
+  (* (learn-option opts ':lambda 1.0)
+     (learn-list-sum
+      (map (lambda (x) (* x x)) (learn-tensor-row values)))))
+
+(define (dense-layer input-size output-size . opts)
+  (vector learn-layer-tag
+          'dense
+          (list (learn-pair ':input-size input-size)
+                (learn-pair ':output-size output-size)
+                (learn-pair ':activation
+                            (learn-option opts ':activation 'linear)))))
+
+(define (activation-layer activation)
+  (vector learn-layer-tag
+          'activation
+          (list (learn-pair ':activation activation))))
+
+(define (learn-layer? x)
+  (and (vector? x)
+       (>= (vector-length x) 3)
+       (eq? (vector-ref x 0) learn-layer-tag)))
+
+(define (learn-layer-kind layer) (vector-ref layer 1))
+(define (learn-layer-params layer) (vector-ref layer 2))
+
+(define (sequential-model layers)
+  (vector learn-model-tag layers))
+
+(define (learn-model? x)
+  (and (vector? x)
+       (>= (vector-length x) 2)
+       (eq? (vector-ref x 0) learn-model-tag)))
+
+(define (learn-model-layers model) (vector-ref model 1))
+
+(define (learn-layer-input-size layer)
+  (learn-alist-get (learn-layer-params layer) ':input-size 0))
+
+(define (learn-layer-output-size layer)
+  (learn-alist-get (learn-layer-params layer) ':output-size 0))
+
+(define (learn-layer-activation layer)
+  (learn-alist-get (learn-layer-params layer) ':activation 'linear))
+
+(define (layer-param-count layer)
+  (if (equal? (learn-layer-kind layer) 'dense)
+      (+ (* (learn-layer-input-size layer)
+            (learn-layer-output-size layer))
+         (learn-layer-output-size layer))
+      0))
+
+(define (model-param-count model)
+  (letrec ((loop (lambda (layers)
+                   (if (null? layers)
+                       0
+                       (+ (layer-param-count (car layers))
+                          (loop (cdr layers)))))))
+    (loop (learn-model-layers model))))
+
+(define (model-zero-params model)
+  (make-vector (model-param-count model) 0.0))
+
+(define (learn-model-init-value seed scale idx)
+  (* scale (sin (+ seed (* 12.9898 (+ idx 1))))))
+
+(define (learn-model-init-loop out seed scale i n)
+  (if (>= i n)
+      out
+      (begin
+        (vector-set! out i (learn-model-init-value seed scale i))
+        (learn-model-init-loop out seed scale (+ i 1) n))))
+
+(define (model-init-params model . opts)
+  (let* ((n (model-param-count model))
+         (out (make-vector n 0.0)))
+    (learn-model-init-loop out
+                           (learn-option opts ':seed 17)
+                           (learn-option opts ':scale 0.1)
+                           0
+                           n)))
+
+(define (learn-model-activation activation x)
+  (cond
+    ((equal? activation 'linear) x)
+    ((equal? activation 'tanh) (tanh x))
+    ((equal? activation 'sigmoid)
+     (/ 1.0 (+ 1.0 (exp (- x)))))
+    ((equal? activation 'relu)
+     (if (> x 0.0) x 0.0))
+    (else (error "model-forward" "unknown activation" activation))))
+
+(define (learn-dense-weight-index offset input-size output-index input-index)
+  (+ offset (+ (* output-index input-size) input-index)))
+
+(define (learn-dense-bias-index offset input-size output-size output-index)
+  (+ offset (* input-size output-size) output-index))
+
+(define (learn-dense-sum params row offset input-size output-index input-index acc)
+  (if (>= input-index input-size)
+      acc
+      (learn-dense-sum
+       params
+       row
+       offset
+       input-size
+       output-index
+       (+ input-index 1)
+       (+ acc
+          (* (vector-ref params
+                         (learn-dense-weight-index offset
+                                                   input-size
+                                                   output-index
+                                                   input-index))
+             (list-ref row input-index))))))
+
+(define (learn-dense-forward-loop layer params row offset output-index)
+  (let* ((input-size (learn-layer-input-size layer))
+         (output-size (learn-layer-output-size layer))
+         (activation (learn-layer-activation layer)))
+    (if (>= output-index output-size)
+        '()
+        (let* ((raw (+ (vector-ref params
+                                   (learn-dense-bias-index offset
+                                                           input-size
+                                                           output-size
+                                                           output-index))
+                       (learn-dense-sum params
+                                        row
+                                        offset
+                                        input-size
+                                        output-index
+                                        0
+                                        0.0))))
+          (cons (learn-model-activation activation raw)
+                (learn-dense-forward-loop layer
+                                          params
+                                          row
+                                          offset
+                                          (+ output-index 1)))))))
+
+(define (learn-layer-forward layer params row offset)
+  (cond
+    ((equal? (learn-layer-kind layer) 'dense)
+     (learn-dense-forward-loop
+      layer
+      params
+      (learn-validate-row-width (learn-tensor-row row)
+                                (learn-layer-input-size layer)
+                                "model-forward")
+      offset
+      0))
+    ((equal? (learn-layer-kind layer) 'activation)
+     (map (lambda (x)
+            (learn-model-activation (learn-layer-activation layer) x))
+          (learn-tensor-row row)))
+    (else (error "model-forward" "unknown layer kind" (learn-layer-kind layer)))))
+
+(define (learn-model-forward-loop layers params row offset)
+  (if (null? layers)
+      row
+      (let* ((layer (car layers))
+             (next-row (learn-layer-forward layer params row offset))
+             (next-offset (+ offset (layer-param-count layer))))
+        (learn-model-forward-loop (cdr layers) params next-row next-offset))))
+
+(define (model-forward model params row)
+  (learn-list->vector
+   (learn-model-forward-loop (learn-model-layers model)
+                             params
+                             (learn-tensor-row row)
+                             0)))
+
+(define (model-predict model params x)
+  (map (lambda (row) (model-forward model params row))
+       (learn-seq->list x)))
+
+(define (learn-model-loss-loop model params rows ys loss-fn acc n)
+  (if (or (null? rows) (null? ys))
+      (if (= n 0) 0.0 (/ acc n))
+      (learn-model-loss-loop
+       model
+       params
+       (cdr rows)
+       (cdr ys)
+       loss-fn
+       (+ acc (loss-fn (learn-tensor-row (car ys))
+                       (learn-tensor-row (model-forward model
+                                                        params
+                                                        (car rows)))))
+       (+ n 1))))
+
+(define (model-mse-loss model params x y)
+  (learn-model-loss-loop model
+                         params
+                         (learn-seq->list x)
+                         (learn-seq->list y)
+                         tensor-mse-loss
+                         0.0
+                         0))
+
+(define (model-binary-cross-entropy-loss model params x y)
+  (learn-model-loss-loop model
+                         params
+                         (learn-seq->list x)
+                         (learn-seq->list y)
+                         tensor-binary-cross-entropy
+                         0.0
+                         0))

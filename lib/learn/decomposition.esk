@@ -1,0 +1,229 @@
+;;; learn/decomposition.esk
+;;;
+;;; Dimensionality-reduction estimators.
+
+(require learn.core)
+(require learn.protocols)
+
+(provide pca)
+
+(define (learn-pca-row row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-pca-rows x)
+  (map learn-pca-row (learn-seq->list x)))
+
+(define (learn-pca-column rows idx)
+  (if (null? rows)
+      '()
+      (cons (list-ref (car rows) idx)
+            (learn-pca-column (cdr rows) idx))))
+
+(define (learn-pca-means rows idx n)
+  (if (>= idx n)
+      '()
+      (cons (learn-list-mean (learn-pca-column rows idx))
+            (learn-pca-means rows (+ idx 1) n))))
+
+(define (learn-pca-center-row row means)
+  (if (or (null? row) (null? means))
+      '()
+      (cons (- (car row) (car means))
+            (learn-pca-center-row (cdr row) (cdr means)))))
+
+(define (learn-pca-center-rows rows means)
+  (if (null? rows)
+      '()
+      (cons (learn-pca-center-row (car rows) means)
+            (learn-pca-center-rows (cdr rows) means))))
+
+(define (learn-pca-vector-norm v)
+  (sqrt (learn-dot v v)))
+
+(define (learn-pca-list-scale s v)
+  (if (null? v)
+      '()
+      (cons (* s (car v)) (learn-pca-list-scale s (cdr v)))))
+
+(define (learn-pca-list-sub a b)
+  (if (or (null? a) (null? b))
+      '()
+      (cons (- (car a) (car b)) (learn-pca-list-sub (cdr a) (cdr b)))))
+
+(define (learn-pca-list-add a b)
+  (if (or (null? a) (null? b))
+      '()
+      (cons (+ (car a) (car b)) (learn-pca-list-add (cdr a) (cdr b)))))
+
+(define (learn-pca-normalize v)
+  (let ((norm (learn-pca-vector-norm v)))
+    (if (= norm 0.0)
+        v
+        (learn-pca-list-scale (/ 1.0 norm) v))))
+
+(define (learn-pca-zero-list n)
+  (if (<= n 0)
+      '()
+      (cons 0.0 (learn-pca-zero-list (- n 1)))))
+
+(define (learn-pca-cov-mul-loop rows v acc)
+  (if (null? rows)
+      acc
+      (let* ((row (car rows))
+             (projection (learn-dot row v)))
+        (learn-pca-cov-mul-loop
+         (cdr rows)
+         v
+         (learn-pca-list-add acc (learn-pca-list-scale projection row))))))
+
+(define (learn-pca-cov-mul centered v n-rows n)
+  (if (= n-rows 0)
+      (learn-pca-zero-list n)
+      (learn-pca-list-scale
+       (/ 1.0 n-rows)
+       (learn-pca-cov-mul-loop centered v (learn-pca-zero-list n)))))
+
+(define (learn-pca-orthogonalize v components)
+  (if (null? components)
+      v
+      (let* ((component (learn-seq->list (car components)))
+             (projection (learn-dot v component)))
+        (learn-pca-orthogonalize
+         (learn-pca-list-sub v (learn-pca-list-scale projection component))
+         (cdr components)))))
+
+(define (learn-pca-initial-vector n active-index idx)
+  (if (>= idx n)
+      '()
+      (cons (if (= idx active-index) 1.0 0.1)
+            (learn-pca-initial-vector n active-index (+ idx 1)))))
+
+(define (learn-pca-fit-component centered previous n-rows n iterations v)
+  (if (<= iterations 0)
+      (learn-pca-normalize (learn-pca-orthogonalize v previous))
+      (learn-pca-fit-component
+       centered
+       previous
+       n-rows
+       n
+       (- iterations 1)
+       (learn-pca-normalize
+        (learn-pca-orthogonalize
+         (learn-pca-cov-mul centered v n-rows n)
+         previous)))))
+
+(define (learn-pca-fit-components centered k n-rows n iterations idx previous)
+  (if (or (<= k 0) (>= idx n))
+      (reverse previous)
+      (let* ((initial (learn-pca-initial-vector n idx 0))
+             (component (learn-pca-fit-component
+                         centered previous n-rows n iterations initial)))
+        (learn-pca-fit-components centered
+                                  (- k 1)
+                                  n-rows
+                                  n
+                                  iterations
+                                  (+ idx 1)
+                                  (cons component previous)))))
+
+(define (learn-pca-component-vectors components)
+  (if (null? components)
+      '()
+      (cons (list->vector (car components))
+            (learn-pca-component-vectors (cdr components)))))
+
+(define (learn-pca-fit estimator x y opts)
+  (let* ((rows (learn-pca-rows x))
+         (n (learn-validate-rectangular-rows rows "pca fit"))
+         (k (learn-alist-get (learn-estimator-params estimator) ':n-components 2))
+         (iterations (learn-alist-get (learn-estimator-params estimator) ':iterations 25))
+         (means (learn-pca-means rows 0 n))
+         (centered (learn-pca-center-rows rows means))
+         (components (learn-pca-fit-components centered
+                                               k
+                                               (length rows)
+                                               n
+                                               iterations
+                                               0
+                                               '())))
+    (learn-fitted-estimator-like
+     estimator
+     (vector 'pca-state
+             (learn-list->vector (learn-pca-component-vectors components))
+             (learn-list->vector means)
+             n))))
+
+(define (learn-pca-transform-row row components idx)
+  (if (>= idx (vector-length components))
+      '()
+      (let ((component (learn-seq->list (vector-ref components idx))))
+        (cons (learn-dot row component)
+              (learn-pca-transform-row row components (+ idx 1))))))
+
+(define (learn-pca-state-components state context)
+  (if (and (vector? state) (>= (vector-length state) 4))
+      (vector-ref state 1)
+      (error context "estimator is not fitted")))
+
+(define (learn-pca-state-means state context)
+  (if (and (vector? state) (>= (vector-length state) 4))
+      (vector-ref state 2)
+      (error context "estimator is not fitted")))
+
+(define (learn-pca-state-width state context)
+  (if (and (vector? state) (>= (vector-length state) 4))
+      (vector-ref state 3)
+      (error context "estimator is not fitted")))
+
+(define (learn-pca-transform estimator x opts)
+  (if (not (learn-estimator-fitted? estimator))
+      (error "pca transform" "estimator is not fitted"))
+  (let* ((state (learn-estimator-state estimator))
+         (components (learn-pca-state-components state "pca transform"))
+         (means (learn-pca-state-means state "pca transform"))
+         (n (learn-pca-state-width state "pca transform")))
+    (map (lambda (row)
+           (learn-pca-transform-row
+            (learn-pca-center-row
+             (learn-validate-row-width (learn-pca-row row)
+                                       n
+                                       "pca transform")
+             (learn-seq->list means))
+            components
+            0))
+         (learn-seq->list x))))
+
+(define (pca . opts)
+  (learn-make-estimator
+   'pca
+   (list (learn-pair 'fit learn-pca-fit)
+         (learn-pair 'transform learn-pca-transform))
+   (list (learn-pair ':n-components (learn-option opts ':n-components 2))
+         (learn-pair ':iterations (learn-option opts ':iterations 25)))
+   '()))
+
+(define (learn-pca-component-list->vectors components)
+  (if (null? components)
+      '()
+      (cons (list->vector (car components))
+            (learn-pca-component-list->vectors (cdr components)))))
+
+(define (learn-pca-load params state fitted?)
+  (let ((est (pca)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (vector 'pca-state
+                   (list->vector
+                    (learn-pca-component-list->vectors (list-ref state 1)))
+                   (list->vector (list-ref state 2))
+                   (list-ref state 3)))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(register-estimator-loader 'pca learn-pca-load)

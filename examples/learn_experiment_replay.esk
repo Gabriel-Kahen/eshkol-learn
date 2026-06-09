@@ -1,0 +1,12 @@
+(require learn)
+
+(define (main)
+  (define run (start-run "demo" ':seed 42))
+  (log-param run "model" "linear-regressor")
+  (log-metric run "valid_r2" 0.95 ':step 1)
+  (display (run-summary run)) (newline)
+  (display (replay-run run)) (newline)
+  (end-run run)
+  0)
+
+(main)

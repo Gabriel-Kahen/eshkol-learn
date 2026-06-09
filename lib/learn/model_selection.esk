@@ -1,0 +1,78 @@
+;;; learn/model_selection.esk
+;;;
+;;; Cross-validation and parameter search helpers.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.data)
+
+(provide grid-search random-search cross-validate
+         best-estimator best-params validation-report)
+
+(define learn-search-result-tag 'learn-search-result)
+
+(define (learn-make-search-result best-est best-param report)
+  (vector learn-search-result-tag best-est best-param report))
+
+(define (best-estimator result) (vector-ref result 1))
+(define (best-params result) (vector-ref result 2))
+(define (validation-report result) (vector-ref result 3))
+
+(define (learn-fold-score estimator fold)
+  (let ((train-x (car fold))
+        (train-y (car (cdr fold)))
+        (valid-x (car (cdr (cdr fold))))
+        (valid-y (car (cdr (cdr (cdr fold))))))
+    (fit estimator train-x train-y)
+    (score estimator valid-x valid-y)))
+
+(define (learn-average xs)
+  (if (null? xs) 0.0 (learn-list-mean xs)))
+
+(define (cross-validate estimator x y . opts)
+  (let* ((k (learn-option opts ':k 5))
+         (seed (learn-option opts ':seed #f))
+         (folds (k-fold-split x y ':k k ':seed seed)))
+    (letrec ((loop (lambda (remaining scores)
+                     (if (null? remaining)
+                         (list (learn-pair 'scores (reverse scores))
+                               (learn-pair 'mean-score (learn-average scores)))
+                         (let ((est (learn-copy-estimator estimator)))
+                           (loop (cdr remaining)
+                                 (cons (learn-fold-score est (car remaining))
+                                       scores)))))))
+      (loop folds '()))))
+
+(define (learn-search-eval estimator updates x y k seed)
+  (let ((est (learn-copy-estimator estimator)))
+    (set-params est updates)
+    (let ((cv (cross-validate est x y ':k k ':seed seed)))
+      (list (learn-pair 'estimator est)
+            (learn-pair 'params updates)
+            (learn-pair 'score (learn-alist-get cv 'mean-score 0.0))
+            (learn-pair 'cv cv)))))
+
+(define (learn-search-loop estimator grid x y k seed best-score best-entry report)
+  (if (null? grid)
+      (learn-make-search-result
+       (learn-alist-get best-entry 'estimator #f)
+       (learn-alist-get best-entry 'params '())
+       (reverse report))
+      (let* ((entry (learn-search-eval estimator (car grid) x y k seed))
+             (score-val (learn-alist-get entry 'score 0.0)))
+        (if (or (not best-entry) (> score-val best-score))
+            (learn-search-loop estimator (cdr grid) x y k seed
+                               score-val entry (cons entry report))
+            (learn-search-loop estimator (cdr grid) x y k seed
+                               best-score best-entry (cons entry report))))))
+
+(define (grid-search estimator param-grid x y . opts)
+  (let ((k (learn-option opts ':k 5))
+        (seed (learn-option opts ':seed #f)))
+    (learn-search-loop estimator param-grid x y k seed -999999999.0 #f '())))
+
+(define (random-search estimator param-grid x y . opts)
+  (let* ((n (learn-option opts ':n-iter 10))
+         (k (learn-option opts ':k 5))
+         (seed (learn-option opts ':seed #f)))
+    (grid-search estimator (learn-sample-list param-grid n seed) x y ':k k ':seed seed)))

@@ -1,0 +1,141 @@
+(require learn)
+(require core.testing)
+
+(reset-tests!)
+
+(register-test
+ "classification metrics"
+ (lambda ()
+   (check-approx (accuracy '(1 0 1 1) '(1 0 0 1)) 0.75 0.000001)
+   (check-true (> (f1 '(1 0 1 1) '(1 0 0 1)) 0.0))
+   (check-equal? (car (confusion-matrix '(yes no) '(yes yes))) '(yes no))))
+
+(register-test
+ "regression metrics"
+ (lambda ()
+   (check-approx (mse '(1.0 2.0 3.0) '(1.0 2.0 5.0)) 1.333333333 0.00001)
+   (check-approx (mae '(1.0 2.0 3.0) '(1.0 2.0 5.0)) 0.666666666 0.00001)))
+
+(register-test
+ "deterministic split sizes"
+ (lambda ()
+   (define split-x '((0) (1) (2) (3) (4) (5) (6) (7) (8) (9)))
+   (define split-y '(0 1 2 3 4 5 6 7 8 9))
+   (define split-result (train-valid-test-split split-x split-y ':valid-ratio 0.2 ':test-ratio 0.2 ':seed 42))
+   (check-equal? (length (car split-result)) 6)
+   (check-equal? (length (car (cdr (cdr split-result)))) 2)
+   (check-equal? (length (car (cdr (cdr (cdr (cdr split-result)))))) 2)))
+
+(register-test
+ "dataset summary reports shape and classes"
+ (lambda ()
+   (define summary-ds (tensor-dataset '((1.0 2.0) (3.0 4.0) (5.0 6.0))
+                                      '(yes no yes)))
+   (define summary (dataset-summary summary-ds))
+   (check-equal? (learn-alist-get summary 'samples 0) 3)
+   (check-equal? (learn-alist-get summary 'features 0) 2)
+   (check-equal? (learn-alist-get summary 'x-shape '()) '(3 2))
+   (check-equal? (learn-alist-get summary 'rectangular? #f) #t)
+   (check-equal? (learn-alist-get summary 'targets 0) 3)
+   (check-equal? (learn-alist-get
+                  (learn-alist-get summary 'class-counts '())
+                  'yes
+                  0)
+                 2)))
+
+(register-test
+ "dataset diagnostics report shape problems"
+ (lambda ()
+   (define bad-ds (tensor-dataset '((1.0 2.0) (3.0)) '(yes no maybe)))
+   (define diagnostics (dataset-diagnostics bad-ds ':features 2))
+   (check-equal? (learn-alist-get diagnostics 'samples 0) 2)
+   (check-equal? (learn-alist-get diagnostics 'targets 0) 3)
+   (check-equal? (learn-alist-get diagnostics 'rectangular? #t) #f)
+   (check-equal? (learn-alist-get diagnostics 'valid? #t) #f)
+   (check-true (pair? (learn-alist-get diagnostics 'errors '())))
+   (check-raises (lambda () (validate-dataset bad-ds ':features 2)))
+   (check-raises (lambda ()
+                   (validate-feature-width '((1.0 2.0) (3.0 4.0 5.0))
+                                           2)))))
+
+(register-test
+ "standard scaler centers"
+ (lambda ()
+   (define scaler-test-est (standard-scaler))
+   (fit scaler-test-est '((1.0) (2.0) (3.0)) '(0 0 0))
+   (check-approx (car (car (transform scaler-test-est '((2.0)))))
+                 0.0
+                 0.000001)))
+
+(register-test
+ "label encoder"
+ (lambda ()
+   (define label-test-enc (label-encoder))
+   (fit label-test-enc '(cat dog cat) '(0 0 0))
+   (check-equal? (transform label-test-enc '(dog cat)) '(1 0))))
+
+(register-test
+ "linear regressor fits simple line"
+ (lambda ()
+   (define linear-test-est (linear-regressor ':lr 0.001 ':epochs 1000))
+   (fit linear-test-est '((1.0) (2.0) (3.0) (4.0)) '(2.0 4.0 6.0 8.0))
+   (check-true (< (abs (- (car (predict linear-test-est '((5.0)))) 10.0))
+                  1.0))))
+
+(register-test
+ "pipeline classifier"
+ (lambda ()
+   (define pipe-test-x '((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0)))
+   (define pipe-test-y '(0 1 1 1))
+   (define pipe-test-est
+     (make-pipeline
+      (standard-scaler)
+      (logistic-regressor ':lr 0.2 ':epochs 200)))
+   (fit pipe-test-est pipe-test-x pipe-test-y)
+   (check-true (>= (score pipe-test-est pipe-test-x pipe-test-y) 0.75))))
+
+(register-test
+ "nearest-neighbors honors k"
+ (lambda ()
+   (define nn-test-est (nearest-neighbors ':k 3))
+   (fit nn-test-est '((0.0) (1.0) (2.0)) '(a b b))
+   (check-equal? (predict nn-test-est '((0.1))) '(b))
+   (check-approx (score nn-test-est '((0.1) (1.9)) '(b b)) 1.0 0.000001)))
+
+(register-test
+ "pca requires fit"
+ (lambda ()
+   (define pca-unfit-test-est (pca ':n-components 1))
+   (check-raises (lambda () (transform pca-unfit-test-est '((1.0 2.0)))))))
+
+(register-test
+ "pca transforms fitted rows"
+ (lambda ()
+   (define pca-fit-test-est (pca ':n-components 1))
+   (fit pca-fit-test-est '((1.0 10.0) (2.0 20.0) (3.0 30.0)) '(0 0 0))
+   (check-equal? (length (car (transform pca-fit-test-est '((2.0 20.0)))))
+                 1)))
+
+(register-test
+ "pca projects correlated features"
+ (lambda ()
+   (define pca-corr-test-est (pca ':n-components 1 ':iterations 20))
+   (fit pca-corr-test-est '((1.0 1.0) (2.0 2.0) (3.0 3.0)) '(0 0 0))
+   (check-true (> (car (car (transform pca-corr-test-est '((3.0 3.0)))))
+                  1.0))))
+
+(register-test
+ "mlp classifier learns xor"
+ (lambda ()
+   (define mlp-test-x '((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0)))
+   (define mlp-test-y '(0 1 1 0))
+   (define mlp-test-est
+     (mlp-classifier ':layers '(2 4 1)
+                     ':lr 0.5
+                     ':epochs 1500
+                     ':seed 42))
+   (fit mlp-test-est mlp-test-x mlp-test-y)
+   (check-true (>= (score mlp-test-est mlp-test-x mlp-test-y) 1.0))
+   (check-equal? (length (predict-proba mlp-test-est mlp-test-x)) 4)))
+
+(run-tests)

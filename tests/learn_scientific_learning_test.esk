@@ -1,0 +1,154 @@
+(require learn)
+
+(define (sci-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define (sci-approx label actual expected tol)
+  (sci-assert label (< (abs (- actual expected)) tol)))
+
+;;; Static shape and parameter schemas.
+(define sci-shape (shape-schema 'state '(4 2)))
+(sci-assert "shape schema compatible"
+            (shape-compatible? sci-shape '(4 2)))
+(sci-assert "shape schema wildcard"
+            (shape-compatible? (shape-schema 'batch '(* 3)) '(8 3)))
+(sci-assert "shape schema incompatible"
+            (not (shape-compatible? sci-shape '(4 3))))
+
+(define sci-param-schema
+  (parameter-schema '(offset slope) (vector 0.0 0.0)
+                    ':bounds '((-10.0 10.0) (-10.0 10.0))))
+(sci-assert "parameter schema count"
+            (= (parameter-schema-count sci-param-schema) 2))
+(validate-parameter-vector sci-param-schema (vector 1.0 2.0))
+
+(define sci-model
+  (sequential-model (list (dense-layer 2 1 ':activation 'linear))))
+(define sci-model-shape (model-shape-summary sci-model))
+(sci-assert "model shape input"
+            (equal? (learn-alist-get sci-model-shape 'input-shape '()) '(2)))
+(sci-assert "model shape output"
+            (equal? (learn-alist-get sci-model-shape 'output-shape '()) '(1)))
+(sci-assert "model parameter schema"
+            (= (parameter-schema-count (model-parameter-schema sci-model)) 3))
+
+;;; Time series and simulator objectives.
+(define sci-times '(0.0 1.0 2.0 3.0))
+(define sci-values '(1.0 3.0 5.0 7.0))
+(define sci-ts (time-series-dataset sci-times sci-values ':name 'line))
+(define sci-ts-summary (time-series-summary sci-ts))
+(sci-assert "time-series size"
+            (= (time-series-size sci-ts) 4))
+(sci-assert "time-series summary dimension"
+            (= (learn-alist-get sci-ts-summary 'value-dimension 0) 1))
+
+(define sci-windowed (time-series-windowed-dataset sci-ts 2))
+(sci-assert "windowed dataset size"
+            (= (dataset-size sci-windowed) 2))
+(sci-assert "windowed first x"
+            (equal? (car (dataset-x sci-windowed)) '(1.0 3.0)))
+(sci-assert "windowed first y"
+            (= (car (dataset-y sci-windowed)) 5.0))
+
+(define (sci-line params t)
+  (+ (vector-ref params 0)
+     (* (vector-ref params 1) t)))
+
+(sci-approx "simulator loss exact"
+            (simulator-loss sci-line (vector 1.0 2.0) sci-times sci-values)
+            0.0
+            0.000001)
+
+(define sci-sim-objective
+  (simulator-objective sci-line sci-times sci-values))
+(sci-approx "simulator objective exact"
+            (sci-sim-objective (vector 1.0 2.0))
+            0.0
+            0.000001)
+
+(define sci-fit
+  (time-series-parameter-fit sci-line (vector 0.0 0.0) sci-ts
+                             ':mode 'linear
+                             ':optimizer
+                             (sgd-optimizer ':lr 0.05 ':max-iter 140)))
+(sci-approx "time-series linear fit"
+            (car (predict sci-fit '(4.0)))
+            9.0
+            0.25)
+(sci-approx "time-series closed-form linear params"
+            (vector-ref (time-series-linear-params sci-ts) 1)
+            2.0
+            0.000001)
+
+;;; State-space, ODE, and physics-informed losses.
+(define sci-states (list (vector 1.0) (vector 3.0) (vector 5.0)))
+(define sci-state-space (state-space-dataset '(0.0 1.0 2.0) sci-states))
+(define sci-state-summary (state-space-summary sci-state-space))
+(sci-assert "state-space dimension"
+            (= (state-space-dimension sci-state-space) 1))
+(sci-assert "state-space transitions"
+            (= (learn-alist-get sci-state-summary 'transitions 0) 2))
+(sci-assert "transition-pairs count"
+            (= (length (state-space-transition-pairs sci-state-space)) 2))
+
+(define (constant-rhs params state t)
+  (vector (vector-ref params 0)))
+
+(define sci-ode-states
+  (ode-euler-simulate constant-rhs
+                      (vector 2.0)
+                      (vector 1.0)
+                      '(0.0 1.0 2.0)))
+(sci-approx "euler state final"
+            (vector-ref (car (cdr (cdr sci-ode-states))) 0)
+            5.0
+            0.000001)
+
+(sci-approx "dynamics residual exact"
+            (dynamics-residual-loss constant-rhs
+                                    (vector 2.0)
+                                    sci-states
+                                    '(0.0 1.0 2.0))
+            0.0
+            0.000001)
+
+(sci-approx "conservation loss exact"
+            (conservation-loss (lambda (state) (vector-ref state 0))
+                               (list (vector 4.0) (vector 4.0))
+                               ':target 4.0)
+            0.0
+            0.000001)
+
+(sci-approx "boundary condition loss"
+            (boundary-condition-loss (vector 2.0 3.0) '(2.0 5.0))
+            2.0
+            0.000001)
+
+(sci-approx "physics-informed loss weights"
+            (physics-informed-loss 2.0 4.0
+                                   ':data-weight 1.0
+                                   ':physics-weight 0.5
+                                   ':conservation-loss 3.0
+                                   ':conservation-weight 0.25)
+            4.75
+            0.000001)
+
+(define (objective params)
+  (physics-informed-loss
+   (boundary-condition-loss (vector (vector-ref params 0)) '(2.0))
+   0.0
+   ':physics-weight 0.25))
+
+(define sci-native-fit
+  (optimizer-minimize (autodiff-sgd-optimizer
+                       ':lr 0.2
+                       ':max-iter 40
+                       ':tol 0.0000001)
+                      objective
+                      (vector 0.0)))
+(sci-assert "native autodiff physics objective"
+            (< (objective sci-native-fit) 0.01))
+
+(display "scientific learning pack helpers ... OK") (newline)

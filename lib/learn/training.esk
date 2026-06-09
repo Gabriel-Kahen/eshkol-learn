@@ -1,0 +1,147 @@
+;;; learn/training.esk
+;;;
+;;; Reusable training loops for vector objectives and estimator workflows.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.optimizers)
+(require learn.manifold)
+(require learn.callbacks)
+(require ml.optimization)
+
+(provide train-loop make-trainer training-step validation-step
+         epoch-result history compile-model riemannian-train-loop
+         autodiff-train-loop)
+
+(define learn-trainer-tag 'learn-trainer)
+
+(define (make-trainer estimator . opts)
+  (vector learn-trainer-tag
+          estimator
+          (learn-option opts ':optimizer (sgd-optimizer))
+          (learn-option opts ':loss #f)
+          (learn-option opts ':metrics '())
+          (learn-option opts ':callbacks '())))
+
+(define (learn-trainer-estimator trainer) (vector-ref trainer 1))
+(define (learn-trainer-optimizer trainer) (vector-ref trainer 2))
+(define (learn-trainer-loss trainer) (vector-ref trainer 3))
+(define (learn-trainer-callbacks trainer) (vector-ref trainer 5))
+
+(define (epoch-result epoch loss metrics)
+  (cons (learn-pair 'epoch epoch)
+        (cons (learn-pair 'loss loss) metrics)))
+
+(define (history training-result)
+  (training-result-history training-result))
+
+(define (compile-model estimator . opts)
+  (set-params estimator
+              (list (learn-pair ':optimizer (learn-option opts ':optimizer (sgd-optimizer)))
+                    (learn-pair ':loss (learn-option opts ':loss #f))
+                    (learn-pair ':metrics (learn-option opts ':metrics '())))))
+
+(define (training-step estimator x y . opts)
+  (apply fit (cons estimator (cons x (cons y opts)))))
+
+(define (validation-step estimator x y . opts)
+  (apply score (cons estimator (cons x (cons y opts)))))
+
+(define (learn-gradient-step params grad lr)
+  (learn-vector-sub params (learn-vector-scale lr grad)))
+
+(define (learn-training-riemannian-space optimizer)
+  (if (equal? (optimizer-kind optimizer) 'riemannian-sgd)
+      (learn-alist-get (optimizer-params optimizer) ':space #f)
+      #f))
+
+(define (learn-training-initial-params optimizer params)
+  (let ((space (learn-training-riemannian-space optimizer)))
+    (if space
+        (riemannian-project space params)
+        params)))
+
+(define (learn-training-gradient optimizer params grad)
+  (let ((space (learn-training-riemannian-space optimizer)))
+    (if space
+        (riemannian-gradient space params grad)
+        grad)))
+
+(define (learn-training-step optimizer params grad lr)
+  (let ((space (learn-training-riemannian-space optimizer)))
+    (if space
+        (riemannian-step space params grad lr)
+        (learn-gradient-step params grad lr))))
+
+(define (learn-train-loop-context epoch loss grad params callbacks)
+  (list (learn-pair 'epoch epoch)
+        (learn-pair 'loss loss)
+        (learn-pair 'gradient-norm (tensor-norm grad))
+        (learn-pair 'params params)
+        (learn-pair 'callbacks callbacks)))
+
+;;; train-loop: optimize a vector objective with full-batch gradient descent.
+;;; Arguments:
+;;;   objective: procedure vector -> scalar
+;;;   initial-params: vector
+;;; Options:
+;;;   ':optimizer optimizer-config
+;;;   ':epochs integer
+;;;   ':lr number
+;;;   ':callbacks list
+(define (train-loop objective initial-params . opts)
+  (let* ((optimizer (learn-option opts ':optimizer (sgd-optimizer)))
+         (oparams (optimizer-params optimizer))
+         (epochs (learn-option opts ':epochs
+                               (learn-alist-get oparams ':max-iter 100)))
+         (lr (learn-option opts ':lr
+                           (learn-alist-get oparams ':lr 0.01)))
+         (callbacks (learn-option opts ':callbacks '()))
+         (start-params (learn-training-initial-params optimizer initial-params)))
+    (callback-list-call callbacks 'on-train-begin
+                        (list (learn-pair 'params start-params)))
+    (letrec ((loop (lambda (epoch params hist)
+                     (if (>= epoch epochs)
+                         (begin
+                           (callback-list-call callbacks 'on-train-end
+                                               (list (learn-pair 'params params)))
+                           (learn-make-training-result
+                            #f (reverse hist) '() 'completed epoch))
+                         (let* ((loss (objective params))
+                                (grad (gradient objective params))
+                                (step-grad (learn-training-gradient optimizer params grad))
+                                (ctx (learn-train-loop-context
+                                      epoch loss step-grad params callbacks))
+                                (next-params (learn-training-step optimizer params grad lr)))
+                           (callback-list-call callbacks 'on-epoch-end ctx)
+                           (if (callback-list-stopped? callbacks)
+                               (learn-make-training-result
+                                #f
+                                (reverse (cons ctx hist))
+                                '()
+                                'stopped
+                                (+ epoch 1))
+                               (loop (+ epoch 1)
+                                     next-params
+                                     (cons ctx hist))))))))
+      (loop 0 start-params '()))))
+
+(define (riemannian-train-loop space objective initial-params . opts)
+  (let ((optimizer (learn-option opts
+                                 ':optimizer
+                                 (riemannian-sgd-optimizer space))))
+    (apply train-loop
+           (cons objective
+                 (cons initial-params
+                       (cons ':optimizer
+                             (cons optimizer opts)))))))
+
+(define (autodiff-train-loop objective initial-params . opts)
+  (let ((optimizer (learn-option opts
+                                 ':optimizer
+                                 (autodiff-sgd-optimizer))))
+    (apply train-loop
+           (cons objective
+                 (cons initial-params
+                       (cons ':optimizer
+                             (cons optimizer opts)))))))

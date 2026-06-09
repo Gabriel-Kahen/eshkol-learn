@@ -1,0 +1,159 @@
+;;; learn/callbacks.esk
+;;;
+;;; Callback representation and built-in callback constructors.
+
+(require learn.core)
+(require learn.protocols)
+
+(provide callback? callback-kind callback-state callback-stopped?
+         callback-call callback-list-call callback-list-stopped?
+         early-stopping checkpoint progress-log metric-logger
+         terminate-on-nan lr-scheduler-callback)
+
+(define learn-callback-tag 'learn-callback)
+
+(define (learn-make-callback kind state methods)
+  (vector learn-callback-tag kind state methods #f))
+
+(define (callback? cb)
+  (and (vector? cb)
+       (>= (vector-length cb) 5)
+       (eq? (vector-ref cb 0) learn-callback-tag)))
+
+(define (callback-kind cb) (vector-ref cb 1))
+(define (callback-state cb) (vector-ref cb 2))
+(define (callback-methods cb) (vector-ref cb 3))
+(define (callback-stopped? cb) (vector-ref cb 4))
+(define (learn-set-callback-state! cb state) (vector-set! cb 2 state) cb)
+(define (learn-set-callback-stopped! cb stopped?) (vector-set! cb 4 stopped?) cb)
+
+(define (callback-call cb event context)
+  (let ((method (learn-alist-get (callback-methods cb) event #f)))
+    (if method (method cb context) cb)))
+
+(define (callback-list-call callbacks event context)
+  (if (null? callbacks)
+      callbacks
+      (begin
+        (callback-call (car callbacks) event context)
+        (callback-list-call (cdr callbacks) event context))))
+
+(define (callback-list-stopped? callbacks)
+  (cond
+    ((null? callbacks) #f)
+    ((callback-stopped? (car callbacks)) #t)
+    (else (callback-list-stopped? (cdr callbacks)))))
+
+(define (learn-callback-metric context key)
+  (learn-alist-get context key #f))
+
+(define (learn-early-on-epoch-end cb context)
+  (let* ((state (callback-state cb))
+         (monitor (learn-alist-get state ':monitor 'loss))
+         (patience (learn-alist-get state ':patience 5))
+         (mode (learn-alist-get state ':mode 'min))
+         (best (learn-alist-get state 'best #f))
+         (wait (learn-alist-get state 'wait 0))
+         (value (learn-callback-metric context monitor)))
+    (if value
+        (let ((better?
+               (if best
+                   (if (equal? mode 'max) (> value best) (< value best))
+                   #t)))
+          (if better?
+              (learn-set-callback-state!
+               cb
+               (learn-alist-merge state
+                                  (list (learn-pair 'best value)
+                                        (learn-pair 'wait 0))))
+              (begin
+                (learn-set-callback-state!
+                 cb
+                 (learn-alist-set state 'wait (+ wait 1)))
+                (if (>= (+ wait 1) patience)
+                    (learn-set-callback-stopped! cb #t)))))
+        cb)))
+
+(define (early-stopping . opts)
+  (learn-make-callback
+   'early-stopping
+   (list (learn-pair ':monitor (learn-option opts ':monitor 'loss))
+         (learn-pair ':patience (learn-option opts ':patience 5))
+         (learn-pair ':mode (learn-option opts ':mode 'min))
+         (learn-pair 'best #f)
+         (learn-pair 'wait 0))
+   (list (learn-pair 'on-epoch-end learn-early-on-epoch-end))))
+
+(define (learn-checkpoint-on-epoch-end cb context)
+  (let* ((state (callback-state cb))
+         (path (learn-alist-get state ':path "model.em"))
+         (estimator (learn-alist-get context 'estimator #f)))
+    (if estimator (save-estimator estimator path))
+    cb))
+
+(define (checkpoint path . opts)
+  (learn-make-callback
+   'checkpoint
+   (list (learn-pair ':path path)
+         (learn-pair ':best-only (learn-option opts ':best-only #f)))
+   (list (learn-pair 'on-epoch-end learn-checkpoint-on-epoch-end))))
+
+(define (learn-progress-on-epoch-end cb context)
+  (display "epoch ")
+  (display (learn-alist-get context 'epoch 0))
+  (display " loss=")
+  (display (learn-alist-get context 'loss #f))
+  (newline)
+  cb)
+
+(define (progress-log)
+  (learn-make-callback
+   'progress-log
+   '()
+   (list (learn-pair 'on-epoch-end learn-progress-on-epoch-end))))
+
+(define (learn-metric-logger-on-epoch-end cb context)
+  (let ((state (callback-state cb)))
+    (learn-set-callback-state!
+     cb
+     (learn-alist-set state
+                      'history
+                      (cons context (learn-alist-get state 'history '()))))))
+
+(define (metric-logger)
+  (learn-make-callback
+   'metric-logger
+   (list (learn-pair 'history '()))
+   (list (learn-pair 'on-epoch-end learn-metric-logger-on-epoch-end))))
+
+(define (learn-nan? x)
+  (not (= x x)))
+
+(define (learn-terminate-nan-on-epoch-end cb context)
+  (let ((loss (learn-alist-get context 'loss #f)))
+    (if (and loss (learn-nan? loss))
+        (learn-set-callback-stopped! cb #t)
+        cb)))
+
+(define (terminate-on-nan)
+  (learn-make-callback
+   'terminate-on-nan
+   '()
+   (list (learn-pair 'on-epoch-end learn-terminate-nan-on-epoch-end))))
+
+(define (learn-lr-scheduler-on-epoch-end cb context)
+  (let* ((state (callback-state cb))
+         (schedule (learn-alist-get state ':schedule #f))
+         (epoch (learn-alist-get context 'epoch 0)))
+    (if schedule
+        (learn-set-callback-state!
+         cb
+         (learn-alist-set state 'lr (schedule epoch)))
+        cb)))
+
+(define (lr-scheduler-callback schedule)
+  (learn-make-callback
+   'lr-scheduler
+   (list (learn-pair ':schedule schedule)
+         (learn-pair 'lr #f))
+   (list (learn-pair 'on-epoch-end learn-lr-scheduler-on-epoch-end))))

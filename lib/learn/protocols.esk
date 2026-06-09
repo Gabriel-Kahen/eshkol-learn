@@ -1,0 +1,166 @@
+;;; learn/protocols.esk
+;;;
+;;; Generic estimator protocol dispatch.
+
+(require learn.core)
+(require core.json)
+
+(provide fit predict predict-proba transform fit-transform score params set-params
+         save-estimator load-estimator estimator-kind estimator-state
+         estimator-fitted? estimator-method estimator-has-method?
+         register-estimator-loader
+         make-training-result training-result-estimator
+         training-result-history training-result-metrics
+         training-result-status training-result-epochs
+         make-run-context run-context-name run-context-dir
+         run-context-seed run-context-params)
+
+(define learn-estimator-loaders '())
+
+(define (estimator-kind estimator)
+  (learn-estimator-kind estimator))
+
+(define (estimator-state estimator)
+  (learn-estimator-state estimator))
+
+(define (estimator-fitted? estimator)
+  (learn-estimator-fitted? estimator))
+
+(define (estimator-method estimator name)
+  (let ((method (learn-alist-get (learn-estimator-methods estimator) name #f)))
+    (if method
+        method
+        (error "learn: estimator does not implement method" name))))
+
+(define (estimator-has-method? estimator name)
+  (learn-alist-has? (learn-estimator-methods estimator) name))
+
+(define (fit estimator x . rest)
+  (let ((y (if (null? rest) #f (car rest)))
+        (opts (if (null? rest) '() (cdr rest))))
+    (let ((fitted (apply (estimator-method estimator 'fit)
+                         (list estimator x y opts))))
+      (if (learn-estimator? fitted)
+          (begin
+            (learn-set-estimator-state! estimator (learn-estimator-state fitted))
+            (learn-set-estimator-params! estimator (learn-estimator-params fitted))
+            (learn-set-estimator-methods! estimator (learn-estimator-methods fitted))
+            (learn-set-estimator-fitted! estimator (learn-estimator-fitted? fitted))
+            estimator)
+          fitted))))
+
+(define (predict estimator x . opts)
+  (apply (estimator-method estimator 'predict) (list estimator x opts)))
+
+(define (predict-proba estimator x . opts)
+  (cond
+    ((estimator-has-method? estimator 'predict-proba)
+     (apply (estimator-method estimator 'predict-proba) (list estimator x opts)))
+    (else
+     (error "learn: estimator does not implement predict-proba"
+            (estimator-kind estimator)))))
+
+(define (transform estimator x . opts)
+  (apply (estimator-method estimator 'transform) (list estimator x opts)))
+
+(define (fit-transform estimator x . rest)
+  (let ((y (if (null? rest) #f (car rest)))
+        (opts (if (null? rest) '() (cdr rest))))
+    (apply fit (cons estimator (cons x (cons y opts))))
+    (apply transform (cons estimator (cons x opts)))))
+
+(define (score estimator x y . opts)
+  (cond
+    ((estimator-has-method? estimator 'score)
+     (apply (estimator-method estimator 'score) (list estimator x y opts)))
+    (else
+     (error "learn: estimator does not implement score" (estimator-kind estimator)))))
+
+(define (params estimator)
+  (learn-estimator-params estimator))
+
+(define (set-params estimator updates)
+  (learn-set-estimator-params!
+   estimator
+   (learn-alist-merge (learn-estimator-params estimator) updates)))
+
+(define (make-training-result estimator history metrics status epochs)
+  (learn-make-training-result estimator history metrics status epochs))
+
+(define (make-run-context name dir seed params)
+  (learn-make-run-context name dir seed params))
+
+;;; Persistence writes a JSON manifest for review/replay. Procedure-valued
+;;; methods cannot be serialized in current Eshkol, so estimator modules
+;;; register loader functions that reattach methods for supported kinds.
+(define (register-estimator-loader kind loader)
+  (set! learn-estimator-loaders
+        (learn-alist-set learn-estimator-loaders kind loader))
+  kind)
+
+(define (learn-vector->json-list v i n)
+  (if (>= i n)
+      '()
+      (cons (learn-json-safe (vector-ref v i))
+            (learn-vector->json-list v (+ i 1) n))))
+
+(define (learn-json-safe value)
+  (cond
+    ((vector? value)
+     (learn-vector->json-list value 0 (vector-length value)))
+    ((pair? value)
+     (cons (learn-json-safe (car value))
+           (learn-json-safe (cdr value))))
+    (else value)))
+
+(define (learn-params->hash params)
+  (let ((ht (make-hash-table)))
+    (learn-params->hash-loop params ht)))
+
+(define (learn-params->hash-loop params ht)
+  (if (null? params)
+      ht
+      (begin
+        (hash-set! ht
+                   (symbol->string (learn-pair-key (car params)))
+                   (learn-json-safe (learn-pair-value (car params))))
+        (learn-params->hash-loop (cdr params) ht))))
+
+(define (learn-hash-keys->params ht keys)
+  (if (null? keys)
+      '()
+      (cons (learn-pair (string->symbol (car keys))
+                        (hash-ref ht (car keys)))
+            (learn-hash-keys->params ht (cdr keys)))))
+
+(define (learn-hash->params ht)
+  (if (hash-table? ht)
+      (learn-hash-keys->params ht (hash-keys ht))
+      '()))
+
+(define (save-estimator estimator filename)
+  (let ((ht (make-hash-table)))
+    (hash-set! ht "format" "eshkol.learn.estimator")
+    (hash-set! ht "version" "0.1")
+    (hash-set! ht "kind" (symbol->string (learn-estimator-kind estimator)))
+    (hash-set! ht "fitted" (learn-estimator-fitted? estimator))
+    (hash-set! ht "params" (learn-params->hash (learn-estimator-params estimator)))
+    (hash-set! ht "state" (learn-json-safe (learn-estimator-state estimator)))
+    (json-write-file filename ht)
+    filename))
+
+(define (load-estimator filename)
+  (let* ((manifest (json-read-file filename))
+         (kind (string->symbol (hash-ref manifest "kind" "serialized-estimator")))
+         (params (learn-hash->params (hash-ref manifest "params" #f)))
+         (state (hash-ref manifest "state" '()))
+         (fitted? (hash-ref manifest "fitted" #f))
+         (loader (learn-alist-get learn-estimator-loaders kind #f)))
+    (if loader
+        (loader params state fitted?)
+        (learn-make-estimator
+         'serialized-estimator
+         '()
+         (list (learn-pair 'manifest manifest)
+               (learn-pair 'source filename))
+         manifest))))

@@ -1,0 +1,411 @@
+;;; learn/core.esk
+;;;
+;;; Shared representation and utility functions for eshkol.learn.
+;;; Estimators are tagged vectors:
+;;;   #(learn-estimator kind state params methods fitted?)
+;;; where params and methods are association lists made with (list key value).
+
+(require core.list.transform)
+(require core.list.search)
+(require core.list.convert)
+(require core.list.query)
+(require core.list.higher_order)
+
+(provide learn-estimator-tag learn-training-result-tag learn-run-context-tag
+         learn-make-estimator learn-estimator? learn-estimator-kind
+         learn-estimator-state learn-estimator-params learn-estimator-methods
+         learn-estimator-fitted? learn-set-estimator-state!
+         learn-set-estimator-params! learn-set-estimator-methods!
+         learn-set-estimator-fitted! learn-copy-estimator
+         learn-fitted-estimator-like
+         learn-pair learn-pair-key learn-pair-value learn-alist-get
+         learn-alist-has? learn-alist-set learn-alist-merge
+         learn-option learn-option* learn-seq->list learn-list->vector
+         learn-row-ref learn-row-length learn-nth learn-take learn-drop
+         learn-range learn-list-sum learn-list-mean learn-list-min
+         learn-list-max learn-list-variance learn-list-std
+         learn-validate-non-empty learn-validate-rectangular-rows
+         learn-validate-row-width
+         learn-list-index-of learn-unique learn-count learn-zip
+         learn-shuffle-list learn-sample-list
+         learn-map2 learn-map3 learn-dot learn-zeros-vector
+         learn-vector-add learn-vector-sub learn-vector-scale
+         learn-vector-copy learn-argmax
+         learn-make-training-result learn-training-result?
+         training-result-estimator training-result-history
+         training-result-metrics training-result-status
+         training-result-epochs
+         learn-make-run-context run-context-name run-context-dir
+         run-context-seed run-context-params)
+
+(define learn-estimator-tag 'learn-estimator)
+(define learn-training-result-tag 'learn-training-result)
+(define learn-run-context-tag 'learn-run-context)
+
+;;; ---------------------------------------------------------------------------
+;;; Estimator representation
+;;; ---------------------------------------------------------------------------
+
+(define (learn-make-estimator kind methods params state)
+  (vector learn-estimator-tag kind state params methods #f))
+
+(define (learn-estimator? x)
+  (and (vector? x)
+       (>= (vector-length x) 6)
+       (eq? (vector-ref x 0) learn-estimator-tag)))
+
+(define (learn-estimator-kind e) (vector-ref e 1))
+(define (learn-estimator-state e) (vector-ref e 2))
+(define (learn-estimator-params e) (vector-ref e 3))
+(define (learn-estimator-methods e) (vector-ref e 4))
+(define (learn-estimator-fitted? e) (vector-ref e 5))
+
+(define (learn-set-estimator-state! e state)
+  (vector-set! e 2 state)
+  e)
+
+(define (learn-set-estimator-params! e params)
+  (vector-set! e 3 params)
+  e)
+
+(define (learn-set-estimator-methods! e methods)
+  (vector-set! e 4 methods)
+  e)
+
+(define (learn-set-estimator-fitted! e fitted?)
+  (vector-set! e 5 fitted?)
+  e)
+
+(define (learn-copy-estimator e)
+  (learn-make-estimator (learn-estimator-kind e)
+                        (learn-estimator-methods e)
+                        (learn-estimator-params e)
+                        (learn-estimator-state e)))
+
+(define (learn-fitted-estimator-like estimator state)
+  (let ((fresh (learn-make-estimator (learn-estimator-kind estimator)
+                                     (learn-estimator-methods estimator)
+                                     (learn-estimator-params estimator)
+                                     state)))
+    (learn-set-estimator-fitted! fresh #t)
+    fresh))
+
+;;; ---------------------------------------------------------------------------
+;;; Portable alist helpers.
+;;; Use (list key value), not quoted dotted pairs; current Eshkol reads quoted
+;;; dotted pairs inconsistently in some paths.
+;;; ---------------------------------------------------------------------------
+
+(define (learn-pair key value)
+  (list key value))
+
+(define (learn-pair-key pair)
+  (car pair))
+
+(define (learn-pair-value pair)
+  (cond
+    ((and (pair? (cdr pair)) (null? (cdr (cdr pair))))
+     (car (cdr pair)))
+    (else (cdr pair))))
+
+(define (learn-alist-get alist key default)
+  (cond
+    ((null? alist) default)
+    ((equal? (learn-pair-key (car alist)) key)
+     (learn-pair-value (car alist)))
+    (else (learn-alist-get (cdr alist) key default))))
+
+(define (learn-alist-has? alist key)
+  (cond
+    ((null? alist) #f)
+    ((equal? (learn-pair-key (car alist)) key) #t)
+    (else (learn-alist-has? (cdr alist) key))))
+
+(define (learn-alist-set alist key value)
+  (cond
+    ((null? alist) (list (learn-pair key value)))
+    ((equal? (learn-pair-key (car alist)) key)
+     (cons (learn-pair key value) (cdr alist)))
+    (else
+     (cons (car alist) (learn-alist-set (cdr alist) key value)))))
+
+(define (learn-alist-merge base updates)
+  (if (null? updates)
+      base
+      (learn-alist-merge
+       (learn-alist-set base
+                        (learn-pair-key (car updates))
+                        (learn-pair-value (car updates)))
+       (cdr updates))))
+
+;;; Options are flat property lists:
+;;;   (some-fn x ':lr 0.1 ':epochs 100)
+(define (learn-option opts key default)
+  (cond
+    ((null? opts) default)
+    ((equal? (car opts) key)
+     (if (null? (cdr opts)) default (car (cdr opts))))
+    (else (learn-option (cdr opts) key default))))
+
+(define (learn-option* opts keys default)
+  (if (null? keys)
+      default
+      (let ((v (learn-option opts (car keys) '__learn-not-found__)))
+        (if (equal? v '__learn-not-found__)
+            (learn-option* opts (cdr keys) default)
+            v))))
+
+;;; ---------------------------------------------------------------------------
+;;; Collection helpers
+;;; ---------------------------------------------------------------------------
+
+(define (learn-seq->list xs)
+  (cond
+    ((null? xs) '())
+    ((pair? xs) xs)
+    ((vector? xs) (vector->list xs))
+    (else (list xs))))
+
+(define (learn-list->vector xs)
+  (list->vector xs))
+
+(define (learn-row-ref row idx)
+  (cond
+    ((vector? row) (vector-ref row idx))
+    (else (list-ref row idx))))
+
+(define (learn-row-length row)
+  (cond
+    ((vector? row) (vector-length row))
+    (else (length row))))
+
+(define (learn-nth xs idx)
+  (learn-row-ref xs idx))
+
+(define (learn-take xs n)
+  (if (or (<= n 0) (null? xs))
+      '()
+      (cons (car xs) (learn-take (cdr xs) (- n 1)))))
+
+(define (learn-drop xs n)
+  (if (or (<= n 0) (null? xs))
+      xs
+      (learn-drop (cdr xs) (- n 1))))
+
+(define (learn-range n)
+  (letrec ((loop (lambda (i acc)
+                   (if (< i 0)
+                       acc
+                       (loop (- i 1) (cons i acc))))))
+    (loop (- n 1) '())))
+
+(define (learn-list-sum xs)
+  (if (null? xs)
+      0.0
+      (+ (car xs) (learn-list-sum (cdr xs)))))
+
+(define (learn-list-mean xs)
+  (if (null? xs)
+      0.0
+      (/ (learn-list-sum xs) (length xs))))
+
+(define (learn-list-min xs)
+  (if (null? (cdr xs))
+      (car xs)
+      (min (car xs) (learn-list-min (cdr xs)))))
+
+(define (learn-list-max xs)
+  (if (null? (cdr xs))
+      (car xs)
+      (max (car xs) (learn-list-max (cdr xs)))))
+
+(define (learn-list-variance xs)
+  (if (null? xs)
+      0.0
+      (let ((mu (learn-list-mean xs)))
+        (/ (learn-list-sum
+            (map (lambda (x) (* (- x mu) (- x mu))) xs))
+           (length xs)))))
+
+(define (learn-list-std xs)
+  (sqrt (learn-list-variance xs)))
+
+(define (learn-validate-non-empty xs context)
+  (if (null? xs)
+      (error context "expected at least one row")
+      xs))
+
+(define (learn-validate-row-width row expected context)
+  (if (= (learn-row-length row) expected)
+      row
+      (error context "row width mismatch" expected (learn-row-length row))))
+
+(define (learn-validate-rectangular-rows rows context)
+  (learn-validate-non-empty rows context)
+  (let ((width (learn-row-length (car rows))))
+    (letrec ((loop (lambda (rest)
+                     (cond
+                       ((null? rest) width)
+                       ((= (learn-row-length (car rest)) width)
+                        (loop (cdr rest)))
+                       (else
+                        (error context "non-rectangular rows"
+                               width
+                               (learn-row-length (car rest))))))))
+      (loop rows))))
+
+(define (learn-list-index-of xs value idx)
+  (cond
+    ((null? xs) -1)
+    ((equal? (car xs) value) idx)
+    (else (learn-list-index-of (cdr xs) value (+ idx 1)))))
+
+(define (learn-unique xs)
+  (letrec ((loop (lambda (rest seen)
+                   (cond
+                     ((null? rest) (reverse seen))
+                     ((member (car rest) seen) (loop (cdr rest) seen))
+                     (else (loop (cdr rest) (cons (car rest) seen)))))))
+    (loop xs '())))
+
+(define (learn-count pred xs)
+  (cond
+    ((null? xs) 0)
+    ((pred (car xs)) (+ 1 (learn-count pred (cdr xs))))
+    (else (learn-count pred (cdr xs)))))
+
+(define (learn-normalize-seed seed)
+  (if seed seed 1234567))
+
+(define (learn-lcg-next seed)
+  (modulo (+ (* 1103515245 seed) 12345) 2147483647))
+
+(define (learn-vector-swap! v i j)
+  (let ((tmp (vector-ref v i)))
+    (vector-set! v i (vector-ref v j))
+    (vector-set! v j tmp)))
+
+(define (learn-shuffle-list xs seed)
+  (let* ((v (list->vector xs))
+         (n (vector-length v)))
+    (letrec ((loop (lambda (i state)
+                     (if (> i 1)
+                         (let* ((next (learn-lcg-next state))
+                                (j (modulo next i)))
+                           (learn-vector-swap! v (- i 1) j)
+                           (loop (- i 1) next))
+                         (vector->list v)))))
+      (loop n (learn-normalize-seed seed)))))
+
+(define (learn-sample-list xs k seed)
+  (learn-take (learn-shuffle-list xs seed) k))
+
+(define (learn-zip a b)
+  (if (or (null? a) (null? b))
+      '()
+      (cons (list (car a) (car b))
+            (learn-zip (cdr a) (cdr b)))))
+
+(define (learn-map2 f a b)
+  (if (or (null? a) (null? b))
+      '()
+      (cons (f (car a) (car b))
+            (learn-map2 f (cdr a) (cdr b)))))
+
+(define (learn-map3 f a b c)
+  (if (or (null? a) (null? b) (null? c))
+      '()
+      (cons (f (car a) (car b) (car c))
+            (learn-map3 f (cdr a) (cdr b) (cdr c)))))
+
+(define (learn-dot a b)
+  (if (or (null? a) (null? b))
+      0.0
+      (+ (* (car a) (car b))
+         (learn-dot (cdr a) (cdr b)))))
+
+(define (learn-zeros-vector n)
+  (make-vector n 0.0))
+
+(define (learn-vector-copy-loop v out i n)
+  (if (< i n)
+      (begin
+        (vector-set! out i (vector-ref v i))
+        (learn-vector-copy-loop v out (+ i 1) n))
+      out))
+
+(define (learn-vector-copy v)
+  (let* ((n (vector-length v))
+         (out (make-vector n 0.0)))
+    (learn-vector-copy-loop v out 0 n)))
+
+(define (learn-vector-add-loop a b out i n)
+  (if (< i n)
+      (begin
+        (vector-set! out i (+ (vector-ref a i) (vector-ref b i)))
+        (learn-vector-add-loop a b out (+ i 1) n))
+      out))
+
+(define (learn-vector-add a b)
+  (let* ((n (vector-length a))
+         (out (make-vector n 0.0)))
+    (learn-vector-add-loop a b out 0 n)))
+
+(define (learn-vector-sub-loop a b out i n)
+  (if (< i n)
+      (begin
+        (vector-set! out i (- (vector-ref a i) (vector-ref b i)))
+        (learn-vector-sub-loop a b out (+ i 1) n))
+      out))
+
+(define (learn-vector-sub a b)
+  (let* ((n (vector-length a))
+         (out (make-vector n 0.0)))
+    (learn-vector-sub-loop a b out 0 n)))
+
+(define (learn-vector-scale-loop s v out i n)
+  (if (< i n)
+      (begin
+        (vector-set! out i (* s (vector-ref v i)))
+        (learn-vector-scale-loop s v out (+ i 1) n))
+      out))
+
+(define (learn-vector-scale s v)
+  (let* ((n (vector-length v))
+         (out (make-vector n 0.0)))
+    (learn-vector-scale-loop s v out 0 n)))
+
+(define (learn-argmax xs)
+  (letrec ((loop (lambda (rest best-i best-v i)
+                   (if (null? rest)
+                       best-i
+                       (if (> (car rest) best-v)
+                           (loop (cdr rest) i (car rest) (+ i 1))
+                           (loop (cdr rest) best-i best-v (+ i 1)))))))
+    (if (null? xs) -1 (loop (cdr xs) 0 (car xs) 1))))
+
+;;; ---------------------------------------------------------------------------
+;;; Training result and run context
+;;; ---------------------------------------------------------------------------
+
+(define (learn-make-training-result estimator history metrics status epochs)
+  (vector learn-training-result-tag estimator history metrics status epochs))
+
+(define (learn-training-result? x)
+  (and (vector? x)
+       (>= (vector-length x) 6)
+       (eq? (vector-ref x 0) learn-training-result-tag)))
+
+(define (training-result-estimator r) (vector-ref r 1))
+(define (training-result-history r) (vector-ref r 2))
+(define (training-result-metrics r) (vector-ref r 3))
+(define (training-result-status r) (vector-ref r 4))
+(define (training-result-epochs r) (vector-ref r 5))
+
+(define (learn-make-run-context name dir seed params)
+  (vector learn-run-context-tag name dir seed params))
+
+(define (run-context-name ctx) (vector-ref ctx 1))
+(define (run-context-dir ctx) (vector-ref ctx 2))
+(define (run-context-seed ctx) (vector-ref ctx 3))
+(define (run-context-params ctx) (vector-ref ctx 4))

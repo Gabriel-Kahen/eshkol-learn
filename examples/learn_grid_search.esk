@@ -1,0 +1,17 @@
+(require learn)
+
+(define x '((1.0) (2.0) (3.0) (4.0) (5.0)))
+(define y '(2.0 4.0 6.0 8.0 10.0))
+
+(define grid
+  (list (list (learn-pair ':lr 0.001) (learn-pair ':epochs 50))
+        (list (learn-pair ':lr 0.01) (learn-pair ':epochs 100))))
+
+(define (main)
+  (define result
+    (grid-search (linear-regressor) grid x y ':k 2 ':seed 3))
+
+  (display "best params: ") (display (best-params result)) (newline)
+  (display "candidates: ") (display (length (validation-report result))) (newline))
+
+(main)

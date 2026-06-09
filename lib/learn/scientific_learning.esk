@@ -1,0 +1,477 @@
+;;; learn/scientific_learning.esk
+;;;
+;;; Eshkol-native scientific learning helpers: simulator objectives,
+;;; state-space datasets, physics-informed losses, and static schemas.
+
+(require learn.core)
+(require learn.data)
+(require learn.metrics)
+(require learn.scientific)
+(require learn.autodiff)
+
+(provide simulator-predictions simulator-residuals simulator-loss
+         simulator-objective
+         time-series-dataset time-series? time-series-times time-series-values
+         time-series-params time-series-size time-series-summary
+         time-series-windowed-dataset time-series-linear-params
+         time-series-linear-fit time-series-parameter-fit
+         ode-time-series-fit
+         state-space-dataset state-space? state-space-times state-space-states
+         state-space-params state-space-size state-space-dimension
+         state-space-summary state-space-transition-pairs
+         ode-euler-step ode-euler-simulate
+         dynamics-residual-loss conservation-loss boundary-condition-loss
+         physics-informed-loss
+         shape-schema shape-schema? shape-schema-name shape-schema-dims
+         shape-schema-rank shape-schema-params shape-compatible?
+         shape-schema-summary
+         parameter-schema parameter-schema? parameter-schema-names
+         parameter-schema-initial parameter-schema-count parameter-schema-bounds
+         validate-parameter-vector parameter-schema-summary
+         model-shape-summary model-parameter-schema)
+
+(define learn-time-series-tag 'learn-time-series)
+(define learn-state-space-tag 'learn-state-space)
+(define learn-shape-schema-tag 'learn-shape-schema)
+(define learn-parameter-schema-tag 'learn-parameter-schema)
+
+(define (learn-scientific-row x)
+  (cond
+    ((pair? x) x)
+    ((vector? x) (learn-seq->list x))
+    (else (list x))))
+
+(define (learn-scientific-row-length x)
+  (length (learn-scientific-row x)))
+
+(define (learn-scientific-row-sub a b)
+  (learn-map2 (lambda (x y) (- x y))
+              (learn-scientific-row a)
+              (learn-scientific-row b)))
+
+(define (learn-scientific-row-scale s row)
+  (map (lambda (x) (* s x)) (learn-scientific-row row)))
+
+(define (learn-scientific-row-add a b)
+  (learn-map2 (lambda (x y) (+ x y))
+              (learn-scientific-row a)
+              (learn-scientific-row b)))
+
+(define (learn-scientific-row-sse row)
+  (learn-list-sum
+   (map (lambda (x) (* x x)) (learn-scientific-row row))))
+
+(define (learn-scientific-widths values)
+  (if (null? values)
+      '()
+      (cons (learn-scientific-row-length (car values))
+            (learn-scientific-widths (cdr values)))))
+
+(define (learn-scientific-deltas times)
+  (if (or (null? times) (null? (cdr times)))
+      '()
+      (cons (- (car (cdr times)) (car times))
+            (learn-scientific-deltas (cdr times)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Static shape and parameter schemas
+;;; ---------------------------------------------------------------------------
+
+(define (shape-schema name dims . opts)
+  (vector learn-shape-schema-tag name dims opts))
+
+(define (shape-schema? x)
+  (and (vector? x)
+       (>= (vector-length x) 4)
+       (eq? (vector-ref x 0) learn-shape-schema-tag)))
+
+(define (shape-schema-name schema) (vector-ref schema 1))
+(define (shape-schema-dims schema) (vector-ref schema 2))
+(define (shape-schema-params schema) (vector-ref schema 3))
+(define (shape-schema-rank schema) (length (shape-schema-dims schema)))
+
+(define (learn-shape-dims-compatible? expected actual)
+  (cond
+    ((and (null? expected) (null? actual)) #t)
+    ((or (null? expected) (null? actual)) #f)
+    ((or (equal? (car expected) '*)
+         (equal? (car expected) (car actual)))
+     (learn-shape-dims-compatible? (cdr expected) (cdr actual)))
+    (else #f)))
+
+(define (shape-compatible? schema observed-dims)
+  (learn-shape-dims-compatible? (shape-schema-dims schema)
+                                (learn-seq->list observed-dims)))
+
+(define (shape-schema-summary schema)
+  (list (learn-pair 'name (shape-schema-name schema))
+        (learn-pair 'dims (shape-schema-dims schema))
+        (learn-pair 'rank (shape-schema-rank schema))
+        (learn-pair 'params (shape-schema-params schema))))
+
+(define (parameter-schema names initial . opts)
+  (vector learn-parameter-schema-tag
+          names
+          initial
+          (learn-option opts ':bounds '())
+          opts))
+
+(define (parameter-schema? x)
+  (and (vector? x)
+       (>= (vector-length x) 5)
+       (eq? (vector-ref x 0) learn-parameter-schema-tag)))
+
+(define (parameter-schema-names schema) (vector-ref schema 1))
+(define (parameter-schema-initial schema) (vector-ref schema 2))
+(define (parameter-schema-bounds schema) (vector-ref schema 3))
+(define (parameter-schema-count schema)
+  (length (learn-seq->list (parameter-schema-initial schema))))
+
+(define (validate-parameter-vector schema params)
+  (let ((observed (length (learn-seq->list params)))
+        (expected (parameter-schema-count schema)))
+    (if (not (= observed expected))
+        (error "validate-parameter-vector"
+               "parameter count mismatch"
+               expected
+               observed))
+    params))
+
+(define (parameter-schema-summary schema)
+  (list (learn-pair 'names (parameter-schema-names schema))
+        (learn-pair 'initial (parameter-schema-initial schema))
+        (learn-pair 'count (parameter-schema-count schema))
+        (learn-pair 'bounds (parameter-schema-bounds schema))))
+
+(define (learn-first-dense-layer layers)
+  (cond
+    ((null? layers) #f)
+    ((equal? (learn-layer-kind (car layers)) 'dense) (car layers))
+    (else (learn-first-dense-layer (cdr layers)))))
+
+(define (learn-last-dense-layer layers current)
+  (cond
+    ((null? layers) current)
+    ((equal? (learn-layer-kind (car layers)) 'dense)
+     (learn-last-dense-layer (cdr layers) (car layers)))
+    (else (learn-last-dense-layer (cdr layers) current))))
+
+(define (model-shape-summary model)
+  (let* ((layers (learn-model-layers model))
+         (first (learn-first-dense-layer layers))
+         (last (learn-last-dense-layer layers #f)))
+    (list (learn-pair 'input-shape
+                      (if first
+                          (list (learn-alist-get
+                                 (learn-layer-params first)
+                                 ':input-size
+                                 0))
+                          '()))
+          (learn-pair 'output-shape
+                      (if last
+                          (list (learn-alist-get
+                                 (learn-layer-params last)
+                                 ':output-size
+                                 0))
+                          '()))
+          (learn-pair 'parameter-count (model-param-count model))
+          (learn-pair 'layers (length layers)))))
+
+(define (model-parameter-schema model . opts)
+  (let* ((n (model-param-count model))
+         (initial (learn-option opts ':initial (model-zero-params model)))
+         (names (learn-option opts ':names (learn-range n))))
+    (parameter-schema names initial ':bounds (learn-option opts ':bounds '()))))
+
+;;; ---------------------------------------------------------------------------
+;;; Time-series and state-space datasets
+;;; ---------------------------------------------------------------------------
+
+(define (time-series-dataset times values . opts)
+  (vector learn-time-series-tag times values opts))
+
+(define (time-series? x)
+  (and (vector? x)
+       (>= (vector-length x) 4)
+       (eq? (vector-ref x 0) learn-time-series-tag)))
+
+(define (time-series-times ts) (vector-ref ts 1))
+(define (time-series-values ts) (vector-ref ts 2))
+(define (time-series-params ts) (vector-ref ts 3))
+(define (time-series-size ts) (length (learn-seq->list (time-series-times ts))))
+
+(define (time-series-summary ts)
+  (let* ((times (learn-seq->list (time-series-times ts)))
+         (values (learn-seq->list (time-series-values ts)))
+         (widths (learn-scientific-widths values))
+         (deltas (learn-scientific-deltas times)))
+    (list (learn-pair 'samples (length times))
+          (learn-pair 'value-widths widths)
+          (learn-pair 'value-dimension (if (null? widths) 0 (car widths)))
+          (learn-pair 'time-start (if (null? times) 0.0 (car times)))
+          (learn-pair 'time-end (if (null? times) 0.0 (car (reverse times))))
+          (learn-pair 'dt-min (if (null? deltas) 0.0 (learn-list-min deltas)))
+          (learn-pair 'dt-max (if (null? deltas) 0.0 (learn-list-max deltas))))))
+
+(define (learn-windowed-loop values window-size xs ys)
+  (if (< (length values) (+ window-size 1))
+      (tensor-dataset (reverse xs) (reverse ys))
+      (learn-windowed-loop
+       (cdr values)
+       window-size
+       (cons (learn-take values window-size) xs)
+       (cons (learn-nth values window-size) ys))))
+
+(define (time-series-windowed-dataset ts window-size)
+  (learn-windowed-loop (learn-seq->list (time-series-values ts))
+                       window-size
+                       '()
+                       '()))
+
+(define (learn-linear-fit-numerator times values t-mean y-mean)
+  (if (or (null? times) (null? values))
+      0.0
+      (+ (* (- (car times) t-mean) (- (car values) y-mean))
+         (learn-linear-fit-numerator (cdr times) (cdr values) t-mean y-mean))))
+
+(define (learn-linear-fit-denominator times t-mean)
+  (if (null? times)
+      0.0
+      (+ (* (- (car times) t-mean) (- (car times) t-mean))
+         (learn-linear-fit-denominator (cdr times) t-mean))))
+
+(define (time-series-linear-params ts)
+  (let* ((times (learn-seq->list (time-series-times ts)))
+         (values (learn-seq->list (time-series-values ts)))
+         (t-mean (learn-list-mean times))
+         (y-mean (learn-list-mean values))
+         (den (learn-linear-fit-denominator times t-mean))
+         (slope (if (= den 0.0)
+                    0.0
+                    (/ (learn-linear-fit-numerator times values t-mean y-mean)
+                       den)))
+         (offset (- y-mean (* slope t-mean))))
+    (vector offset slope)))
+
+(define (learn-time-series-linear-model params t)
+  (+ (vector-ref params 0)
+     (* (vector-ref params 1) t)))
+
+(define (learn-scientific-learning-predict estimator x opts)
+  (let ((model-fn (learn-alist-get (learn-estimator-state estimator) 'model-fn #f))
+        (params (learn-alist-get (learn-estimator-state estimator) 'params #f)))
+    (if model-fn
+        (map (lambda (row) (model-fn params row)) (learn-seq->list x))
+        (error "time-series fit" "estimator is missing model-fn"))))
+
+(define (learn-scientific-learning-score estimator x y opts)
+  (r2-score y (learn-scientific-learning-predict estimator x opts)))
+
+(define (learn-time-series-fitted-estimator kind model-fn params)
+  (let ((est (learn-make-estimator
+              kind
+              (list (learn-pair 'predict learn-scientific-learning-predict)
+                    (learn-pair 'score learn-scientific-learning-score))
+              '()
+              (list (learn-pair 'model-fn model-fn)
+                    (learn-pair 'params params)))))
+    (learn-set-estimator-fitted! est #t)
+    est))
+
+(define (time-series-linear-fit ts . opts)
+  (learn-time-series-fitted-estimator
+   'time-series-linear-fit
+   learn-time-series-linear-model
+   (time-series-linear-params ts)))
+
+(define (time-series-parameter-fit simulator-fn initial-params ts . opts)
+  (if (equal? (learn-option opts ':mode 'simulator) 'linear)
+      (learn-time-series-fitted-estimator
+       'time-series-parameter-fit
+       simulator-fn
+       (time-series-linear-params ts))
+      (curve-fit simulator-fn
+                 initial-params
+                 (time-series-times ts)
+                 (time-series-values ts)
+                 ':optimizer
+                 (learn-option opts ':optimizer (sgd-optimizer)))))
+
+(define (ode-time-series-fit simulator-fn initial-params ts . opts)
+  (time-series-parameter-fit simulator-fn
+                             initial-params
+                             ts
+                             ':optimizer
+                             (learn-option opts ':optimizer (sgd-optimizer))))
+
+(define (state-space-dataset times states . opts)
+  (vector learn-state-space-tag times states opts))
+
+(define (state-space? x)
+  (and (vector? x)
+       (>= (vector-length x) 4)
+       (eq? (vector-ref x 0) learn-state-space-tag)))
+
+(define (state-space-times ds) (vector-ref ds 1))
+(define (state-space-states ds) (vector-ref ds 2))
+(define (state-space-params ds) (vector-ref ds 3))
+(define (state-space-size ds) (length (learn-seq->list (state-space-times ds))))
+(define (state-space-dimension ds)
+  (let ((states (learn-seq->list (state-space-states ds))))
+    (if (null? states) 0 (learn-scientific-row-length (car states)))))
+
+(define (state-space-summary ds)
+  (let* ((times (learn-seq->list (state-space-times ds)))
+         (states (learn-seq->list (state-space-states ds))))
+    (list (learn-pair 'samples (length times))
+          (learn-pair 'state-dimension (state-space-dimension ds))
+          (learn-pair 'state-widths (learn-scientific-widths states))
+          (learn-pair 'time-start (if (null? times) 0.0 (car times)))
+          (learn-pair 'time-end (if (null? times) 0.0 (car (reverse times))))
+          (learn-pair 'transitions (max 0 (- (length times) 1))))))
+
+(define (learn-transition-pairs times states)
+  (if (or (null? times)
+          (null? (cdr times))
+          (null? states)
+          (null? (cdr states)))
+      '()
+      (cons (list (car times)
+                  (- (car (cdr times)) (car times))
+                  (car states)
+                  (car (cdr states)))
+            (learn-transition-pairs (cdr times) (cdr states)))))
+
+(define (state-space-transition-pairs ds)
+  (learn-transition-pairs (learn-seq->list (state-space-times ds))
+                          (learn-seq->list (state-space-states ds))))
+
+;;; ---------------------------------------------------------------------------
+;;; Simulator objectives and ODE helpers
+;;; ---------------------------------------------------------------------------
+
+(define (simulator-predictions simulator-fn params inputs)
+  (map (lambda (x) (simulator-fn params x)) (learn-seq->list inputs)))
+
+(define (learn-residual-row pred target)
+  (learn-scientific-row-sub pred target))
+
+(define (learn-simulator-residual-loop preds targets)
+  (if (or (null? preds) (null? targets))
+      '()
+      (cons (learn-residual-row (car preds) (car targets))
+            (learn-simulator-residual-loop (cdr preds) (cdr targets)))))
+
+(define (simulator-residuals simulator-fn params inputs targets)
+  (learn-simulator-residual-loop
+   (simulator-predictions simulator-fn params inputs)
+   (learn-seq->list targets)))
+
+(define (learn-residual-loss-loop residuals total count)
+  (if (null? residuals)
+      (if (= count 0) 0.0 (/ total count))
+      (learn-residual-loss-loop
+       (cdr residuals)
+       (+ total (learn-scientific-row-sse (car residuals)))
+       (+ count (learn-scientific-row-length (car residuals))))))
+
+(define (simulator-loss simulator-fn params inputs targets . opts)
+  (let* ((residuals (simulator-residuals simulator-fn params inputs targets))
+         (data-loss (learn-residual-loss-loop residuals 0.0 0))
+         (regularization (learn-option opts ':regularization 0.0))
+         (regularization-weight (learn-option opts ':regularization-weight 1.0)))
+    (+ data-loss (* regularization-weight regularization))))
+
+(define (simulator-objective simulator-fn inputs targets . opts)
+  (lambda (params)
+    (apply simulator-loss
+           (cons simulator-fn
+                 (cons params
+                       (cons inputs
+                             (cons targets opts)))))))
+
+(define (ode-euler-step rhs params state t dt)
+  (learn-list->vector
+   (learn-scientific-row-add
+    state
+    (learn-scientific-row-scale dt (rhs params state t)))))
+
+(define (learn-ode-euler-loop rhs params state t remaining-times acc)
+  (if (null? remaining-times)
+      (reverse acc)
+      (let* ((next-time (car remaining-times))
+             (dt (- next-time t))
+             (next-state (ode-euler-step rhs params state t dt)))
+        (learn-ode-euler-loop rhs
+                              params
+                              next-state
+                              next-time
+                              (cdr remaining-times)
+                              (cons next-state acc)))))
+
+(define (ode-euler-simulate rhs params initial-state times)
+  (let ((ts (learn-seq->list times)))
+    (if (null? ts)
+        '()
+        (learn-ode-euler-loop rhs
+                              params
+                              initial-state
+                              (car ts)
+                              (cdr ts)
+                              (list initial-state)))))
+
+;;; ---------------------------------------------------------------------------
+;;; Physics-informed losses
+;;; ---------------------------------------------------------------------------
+
+(define (boundary-condition-loss predicted expected)
+  (tensor-mse-loss (learn-scientific-row expected)
+                   (learn-scientific-row predicted)))
+
+(define (learn-conservation-loss-loop invariant-fn states target total n)
+  (if (null? states)
+      (if (= n 0) 0.0 (/ total n))
+      (let ((err (- (invariant-fn (car states)) target)))
+        (learn-conservation-loss-loop invariant-fn
+                                      (cdr states)
+                                      target
+                                      (+ total (* err err))
+                                      (+ n 1)))))
+
+(define (conservation-loss invariant-fn states . opts)
+  (let* ((rows (learn-seq->list states))
+         (target (learn-option opts
+                               ':target
+                               (if (null? rows) 0.0 (invariant-fn (car rows))))))
+    (learn-conservation-loss-loop invariant-fn rows target 0.0 0)))
+
+(define (learn-observed-derivative state next-state dt)
+  (learn-scientific-row-scale (/ 1.0 dt)
+                              (learn-scientific-row-sub next-state state)))
+
+(define (learn-dynamics-loss-loop rhs params pairs total n)
+  (if (null? pairs)
+      (if (= n 0) 0.0 (/ total n))
+      (let* ((entry (car pairs))
+             (t (car entry))
+             (dt (car (cdr entry)))
+             (state (car (cdr (cdr entry))))
+             (next-state (car (cdr (cdr (cdr entry)))))
+             (observed (learn-observed-derivative state next-state dt))
+             (expected (rhs params state t))
+             (loss (tensor-mse-loss observed expected)))
+        (learn-dynamics-loss-loop rhs params (cdr pairs) (+ total loss) (+ n 1)))))
+
+(define (dynamics-residual-loss rhs params states times)
+  (learn-dynamics-loss-loop
+   rhs
+   params
+   (learn-transition-pairs (learn-seq->list times) (learn-seq->list states))
+   0.0
+   0))
+
+(define (physics-informed-loss data-loss residual-loss . opts)
+  (+ (* (learn-option opts ':data-weight 1.0) data-loss)
+     (* (learn-option opts ':physics-weight 1.0) residual-loss)
+     (* (learn-option opts ':conservation-weight 1.0)
+        (learn-option opts ':conservation-loss 0.0))))

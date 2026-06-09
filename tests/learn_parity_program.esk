@@ -1,0 +1,22 @@
+(require learn)
+
+(define parity-x '((0.0 0.0)
+                   (0.0 1.0)
+                   (1.0 0.0)
+                   (1.0 1.0)))
+(define parity-y '(0 1 1 1))
+(define parity-ds (tensor-dataset parity-x parity-y))
+(define parity-shape (validate-dataset parity-ds ':features 2))
+(define parity-model (logistic-regressor ':lr 0.2 ':epochs 250))
+
+(fit parity-model parity-x parity-y)
+
+(display "learn-parity-shape=")
+(display (learn-alist-get parity-shape 'x-shape '()))
+(newline)
+(display "learn-parity-predictions=")
+(display (predict parity-model parity-x))
+(newline)
+(display "learn-parity-score=")
+(display (score parity-model parity-x parity-y))
+(newline)

@@ -1,0 +1,97 @@
+(require learn)
+
+(define (autodiff-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define (autodiff-approx label actual expected tol)
+  (autodiff-assert label (< (abs (- actual expected)) tol)))
+
+(autodiff-approx "tensor mse loss"
+                 (tensor-mse-loss '(1.0 2.0) '(2.0 4.0))
+                 2.5
+                 0.000001)
+
+(autodiff-approx "tensor mae loss"
+                 (tensor-mae-loss '(1.0 2.0) '(2.0 4.0))
+                 1.5
+                 0.000001)
+
+(autodiff-approx "tensor binary cross entropy"
+                 (tensor-binary-cross-entropy '(1.0 0.0) '(0.8 0.2))
+                 0.223143551
+                 0.000001)
+
+(autodiff-approx "tensor l2"
+                 (tensor-l2-regularization '(1.0 2.0) ':lambda 0.5)
+                 2.5
+                 0.000001)
+
+(define autodiff-linear-model
+  (sequential-model (list (dense-layer 1 1 ':activation 'linear))))
+
+(autodiff-assert "model param count"
+                 (= (model-param-count autodiff-linear-model) 2))
+
+(define autodiff-forward
+  (model-forward autodiff-linear-model (vector 2.0 0.5) '(3.0)))
+(autodiff-approx "dense forward"
+                 (vector-ref autodiff-forward 0)
+                 6.5
+                 0.000001)
+
+(define autodiff-sigmoid-model
+  (sequential-model (list (dense-layer 1 1 ':activation 'linear)
+                          (activation-layer 'sigmoid))))
+(define autodiff-sigmoid-forward
+  (model-forward autodiff-sigmoid-model (vector 0.0 0.0) '(4.0)))
+(autodiff-approx "activation layer"
+                 (vector-ref autodiff-sigmoid-forward 0)
+                 0.5
+                 0.000001)
+
+(define autodiff-x '((1.0) (2.0) (3.0) (4.0)))
+(define autodiff-y '(2.0 4.0 6.0 8.0))
+
+(define (objective params)
+  (model-mse-loss autodiff-linear-model params autodiff-x autodiff-y))
+
+(define autodiff-start (vector 0.0 0.0))
+(define autodiff-trained
+  (optimizer-minimize (autodiff-sgd-optimizer
+                      ':lr 0.04
+                       ':max-iter 180
+                       ':tol 0.0000001)
+                      objective
+                      autodiff-start))
+
+(autodiff-assert "autodiff optimizer lowers model loss"
+                 (< (objective autodiff-trained)
+                    0.01))
+(autodiff-approx "autodiff learned weight"
+                 (vector-ref autodiff-trained 0)
+                 2.0
+                 0.15)
+
+(define autodiff-adam-trained
+  (optimizer-minimize (autodiff-adam-optimizer
+                       ':lr 0.1
+                       ':max-iter 240
+                       ':tol 0.0000001)
+                      objective
+                      autodiff-start))
+
+(autodiff-assert "autodiff adam lowers model loss"
+                 (< (objective autodiff-adam-trained)
+                    0.02))
+
+(define autodiff-loop-result
+  (autodiff-train-loop objective
+                       autodiff-start
+                       ':epochs 4
+                       ':lr 0.1))
+(autodiff-assert "autodiff train-loop history"
+                 (= (length (history autodiff-loop-result)) 4))
+
+(display "native autodiff learn helpers ... OK") (newline)

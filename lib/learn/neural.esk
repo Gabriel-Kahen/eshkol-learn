@@ -1,0 +1,311 @@
+;;; learn/neural.esk
+;;;
+;;; Small one-hidden-layer MLP estimators trained with explicit backprop.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.metrics)
+
+(provide mlp-regressor mlp-classifier)
+
+(define (learn-mlp-row row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-mlp-rows x)
+  (map learn-mlp-row (learn-seq->list x)))
+
+(define (learn-mlp-layer-hidden-size layers input-size)
+  (cond
+    ((null? layers) 4)
+    ((null? (cdr layers)) (car layers))
+    ((= (car layers) input-size) (car (cdr layers)))
+    (else (car layers))))
+
+(define (learn-mlp-init-value seed idx)
+  (* 0.7 (sin (+ seed (* 12.9898 (+ idx 1))))))
+
+(define (learn-mlp-init-vector-loop v seed offset i n)
+  (if (>= i n)
+      v
+      (begin
+        (vector-set! v i (learn-mlp-init-value seed (+ offset i)))
+        (learn-mlp-init-vector-loop v seed offset (+ i 1) n))))
+
+(define (learn-mlp-init-vector n seed offset)
+  (let ((v (make-vector n 0.0)))
+    (learn-mlp-init-vector-loop v seed offset 0 n)))
+
+(define (learn-mlp-w1-index hidden input-size input-index)
+  (+ (* hidden input-size) input-index))
+
+(define (learn-mlp-hidden-z-loop w1 row input-size h i acc)
+  (if (>= i input-size)
+      acc
+      (learn-mlp-hidden-z-loop
+       w1 row input-size h (+ i 1)
+       (+ acc (* (vector-ref w1 (learn-mlp-w1-index h input-size i))
+                 (list-ref row i))))))
+
+(define (learn-mlp-hidden-loop w1 b1 row input-size hidden-size out h)
+  (if (>= h hidden-size)
+      out
+      (let ((z (+ (vector-ref b1 h)
+                  (learn-mlp-hidden-z-loop w1 row input-size h 0 0.0))))
+        (vector-set! out h (tanh z))
+        (learn-mlp-hidden-loop w1 b1 row input-size hidden-size out (+ h 1)))))
+
+(define (learn-mlp-hidden w1 b1 row input-size hidden-size)
+  (let ((out (make-vector hidden-size 0.0)))
+    (learn-mlp-hidden-loop w1 b1 row input-size hidden-size out 0)))
+
+(define (learn-mlp-output-raw-loop w2 hidden h hidden-size acc)
+  (if (>= h hidden-size)
+      acc
+      (learn-mlp-output-raw-loop
+       w2 hidden (+ h 1) hidden-size
+       (+ acc (* (vector-ref w2 h) (vector-ref hidden h))))))
+
+(define (learn-mlp-sigmoid x)
+  (/ 1.0 (+ 1.0 (exp (- x)))))
+
+(define (learn-mlp-forward-values state row)
+  (let* ((task (vector-ref state 1))
+         (input-size (vector-ref state 2))
+         (hidden-size (vector-ref state 3))
+         (w1 (vector-ref state 4))
+         (b1 (vector-ref state 5))
+         (w2 (vector-ref state 6))
+         (b2 (vector-ref state 7))
+         (hidden (learn-mlp-hidden w1 b1 row input-size hidden-size))
+         (raw (+ b2 (learn-mlp-output-raw-loop w2 hidden 0 hidden-size 0.0)))
+         (out (if (equal? task 'classification)
+                  (learn-mlp-sigmoid raw)
+                  raw)))
+    (list out hidden)))
+
+(define (learn-mlp-forward state row)
+  (car (learn-mlp-forward-values state row)))
+
+(define (learn-mlp-classes ys)
+  (let ((classes (learn-unique ys)))
+    (if (null? (cdr classes))
+        (list (car classes) (car classes))
+        classes)))
+
+(define (learn-mlp-positive classes)
+  (if (null? (cdr classes)) (car classes) (car (cdr classes))))
+
+(define (learn-mlp-target y task classes)
+  (if (equal? task 'classification)
+      (if (equal? y (learn-mlp-positive classes)) 1.0 0.0)
+      y))
+
+(define (learn-mlp-update-w1-loop w1 row input-size h delta i)
+  (if (>= i input-size)
+      w1
+      (begin
+        (vector-set! w1
+                     (learn-mlp-w1-index h input-size i)
+                     (- (vector-ref w1 (learn-mlp-w1-index h input-size i))
+                        (* delta (list-ref row i))))
+        (learn-mlp-update-w1-loop w1 row input-size h delta (+ i 1)))))
+
+(define (learn-mlp-train-row-hidden-loop w1 b1 w2 row hidden input-size hidden-size lr delta-out h)
+  (if (>= h hidden-size)
+      #t
+      (let* ((hval (vector-ref hidden h))
+             (old-w2 (vector-ref w2 h))
+             (hidden-delta (* delta-out old-w2 (- 1.0 (* hval hval))))
+             (scaled-hidden-delta (* lr hidden-delta)))
+        (vector-set! w2 h (- old-w2 (* lr delta-out hval)))
+        (vector-set! b1 h (- (vector-ref b1 h) scaled-hidden-delta))
+        (learn-mlp-update-w1-loop w1 row input-size h scaled-hidden-delta 0)
+        (learn-mlp-train-row-hidden-loop
+         w1 b1 w2 row hidden input-size hidden-size lr delta-out (+ h 1)))))
+
+(define (learn-mlp-train-row state row y lr)
+  (let* ((task (vector-ref state 1))
+         (input-size (vector-ref state 2))
+         (hidden-size (vector-ref state 3))
+         (w1 (vector-ref state 4))
+         (b1 (vector-ref state 5))
+         (w2 (vector-ref state 6))
+         (b2 (vector-ref state 7))
+         (classes (learn-seq->list (vector-ref state 8)))
+         (fv (learn-mlp-forward-values state row))
+         (pred (car fv))
+         (hidden (car (cdr fv)))
+         (target (learn-mlp-target y task classes))
+         (err (- pred target))
+         (delta-out (if (equal? task 'classification)
+                        err
+                        (* 2.0 err))))
+    (vector-set! state 7 (- b2 (* lr delta-out)))
+    (learn-mlp-train-row-hidden-loop
+     w1 b1 w2 row hidden input-size hidden-size lr delta-out 0)
+    state))
+
+(define (learn-mlp-train-epoch state rows ys lr)
+  (if (or (null? rows) (null? ys))
+      state
+      (begin
+        (learn-mlp-train-row state (car rows) (car ys) lr)
+        (learn-mlp-train-epoch state (cdr rows) (cdr ys) lr))))
+
+(define (learn-mlp-train-loop state rows ys lr epoch epochs)
+  (if (>= epoch epochs)
+      state
+      (begin
+        (learn-mlp-train-epoch state rows ys lr)
+        (learn-mlp-train-loop state rows ys lr (+ epoch 1) epochs))))
+
+(define (learn-mlp-make-state task input-size hidden-size seed classes)
+  (let* ((w1-size (* input-size hidden-size))
+         (w1 (learn-mlp-init-vector w1-size seed 0))
+         (b1 (learn-mlp-init-vector hidden-size seed w1-size))
+         (w2 (learn-mlp-init-vector hidden-size seed (+ w1-size hidden-size)))
+         (b2 (learn-mlp-init-value seed (+ w1-size hidden-size hidden-size))))
+    (vector 'mlp-state
+            task
+            input-size
+            hidden-size
+            w1
+            b1
+            w2
+            b2
+            (list->vector classes))))
+
+(define (learn-mlp-fit estimator x y opts)
+  (let* ((task (learn-alist-get (learn-estimator-params estimator) ':task 'regression))
+         (layers (learn-alist-get (learn-estimator-params estimator) ':layers '(4)))
+         (lr (learn-alist-get (learn-estimator-params estimator) ':lr 0.1))
+         (epochs (learn-alist-get (learn-estimator-params estimator) ':epochs 200))
+         (seed (learn-alist-get (learn-estimator-params estimator) ':seed 17))
+         (rows (learn-mlp-rows x))
+         (ys (learn-seq->list y))
+         (input-size (learn-validate-rectangular-rows rows "mlp fit"))
+         (hidden-size (learn-mlp-layer-hidden-size layers input-size))
+         (classes (if (equal? task 'classification)
+                      (learn-mlp-classes ys)
+                      '()))
+         (state (learn-mlp-make-state task input-size hidden-size seed classes)))
+    (if (not (= (length rows) (length ys)))
+        (error "mlp fit" "x/y length mismatch" (length rows) (length ys)))
+    (learn-fitted-estimator-like
+     estimator
+     (learn-mlp-train-loop state rows ys lr 0 epochs))))
+
+(define (learn-mlp-predict-list state rows task threshold)
+  (if (null? rows)
+      '()
+      (let* ((classes (learn-seq->list (vector-ref state 8)))
+             (negative (if (null? classes) 0 (car classes)))
+             (positive (if (null? classes) 1 (learn-mlp-positive classes)))
+             (pred (learn-mlp-forward state (car rows))))
+        (cons (if (equal? task 'classification)
+                  (if (>= pred threshold) positive negative)
+                  pred)
+              (learn-mlp-predict-list state (cdr rows) task threshold)))))
+
+(define (learn-mlp-predict estimator x opts)
+  (if (not (learn-estimator-fitted? estimator))
+      (error "mlp predict" "estimator is not fitted"))
+  (let* ((state (learn-estimator-state estimator))
+         (task (vector-ref state 1))
+         (input-size (vector-ref state 2))
+         (threshold (learn-alist-get (learn-estimator-params estimator) ':threshold 0.5)))
+    (learn-mlp-predict-list
+     state
+     (map (lambda (row)
+            (learn-validate-row-width (learn-mlp-row row)
+                                      input-size
+                                      "mlp predict"))
+          (learn-seq->list x))
+     task
+     threshold)))
+
+(define (learn-mlp-proba-list state rows input-size)
+  (if (null? rows)
+      '()
+      (cons (learn-mlp-forward
+             state
+             (learn-validate-row-width (learn-mlp-row (car rows))
+                                       input-size
+                                       "mlp predict-proba"))
+            (learn-mlp-proba-list state (cdr rows) input-size))))
+
+(define (learn-mlp-predict-proba estimator x opts)
+  (if (not (learn-estimator-fitted? estimator))
+      (error "mlp predict-proba" "estimator is not fitted"))
+  (let* ((state (learn-estimator-state estimator))
+         (input-size (vector-ref state 2)))
+    (learn-mlp-proba-list state (learn-seq->list x) input-size)))
+
+(define (learn-mlp-score estimator x y opts)
+  (let ((task (learn-alist-get (learn-estimator-params estimator) ':task 'regression)))
+    (if (equal? task 'classification)
+        (accuracy y (learn-mlp-predict estimator x opts))
+        (r2-score y (learn-mlp-predict estimator x opts)))))
+
+(define (mlp-regressor . opts)
+  (learn-make-estimator
+   'mlp-regressor
+   (list (learn-pair 'fit learn-mlp-fit)
+         (learn-pair 'predict learn-mlp-predict)
+         (learn-pair 'score learn-mlp-score))
+   (list (learn-pair ':task 'regression)
+         (learn-pair ':layers (learn-option opts ':layers '(4)))
+         (learn-pair ':lr (learn-option opts ':lr 0.05))
+         (learn-pair ':epochs (learn-option opts ':epochs 200))
+         (learn-pair ':seed (learn-option opts ':seed 17)))
+   '()))
+
+(define (mlp-classifier . opts)
+  (learn-make-estimator
+   'mlp-classifier
+   (list (learn-pair 'fit learn-mlp-fit)
+         (learn-pair 'predict learn-mlp-predict)
+         (learn-pair 'predict-proba learn-mlp-predict-proba)
+         (learn-pair 'score learn-mlp-score))
+   (list (learn-pair ':task 'classification)
+         (learn-pair ':layers (learn-option opts ':layers '(4)))
+         (learn-pair ':lr (learn-option opts ':lr 0.5))
+         (learn-pair ':epochs (learn-option opts ':epochs 1000))
+         (learn-pair ':threshold (learn-option opts ':threshold 0.5))
+         (learn-pair ':seed (learn-option opts ':seed 17)))
+   '()))
+
+(define (learn-mlp-json-state state)
+  (vector 'mlp-state
+          (string->symbol (list-ref state 1))
+          (list-ref state 2)
+          (list-ref state 3)
+          (list->vector (list-ref state 4))
+          (list->vector (list-ref state 5))
+          (list->vector (list-ref state 6))
+          (list-ref state 7)
+          (list->vector (list-ref state 8))))
+
+(define (learn-mlp-regressor-load params state fitted?)
+  (let ((est (mlp-regressor)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state! est (learn-mlp-json-state state))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(define (learn-mlp-classifier-load params state fitted?)
+  (let ((est (mlp-classifier)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state! est (learn-mlp-json-state state))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(register-estimator-loader 'mlp-regressor learn-mlp-regressor-load)
+(register-estimator-loader 'mlp-classifier learn-mlp-classifier-load)

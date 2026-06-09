@@ -1,0 +1,107 @@
+;;; learn/manifold.esk
+;;;
+;;; Riemannian update helpers for geometry-aware learning.
+
+(require learn.core)
+(require learn.geometry)
+
+(provide riemannian-project riemannian-gradient riemannian-step)
+
+(define (learn-manifold-row row)
+  (learn-seq->list row))
+
+(define (learn-manifold-vector row)
+  (if (vector? row)
+      (learn-vector-copy row)
+      (learn-list->vector (learn-manifold-row row))))
+
+(define (learn-manifold-scale-row row scale)
+  (map (lambda (x) (* x scale)) row))
+
+(define (learn-manifold-sub-row a b)
+  (learn-map2 (lambda (x y) (- x y)) a b))
+
+(define (learn-manifold-norm row)
+  (sqrt (learn-dot row row)))
+
+(define (learn-manifold-radius space)
+  (let ((curvature (geometry-space-curvature space)))
+    (if (= curvature 0.0)
+        1.0
+        (/ 1.0 (sqrt (abs curvature))))))
+
+(define (learn-manifold-max-norm space)
+  (learn-option (geometry-space-params space) ':max-norm 0.999))
+
+(define (learn-manifold-project-spherical space row)
+  (let* ((radius (learn-manifold-radius space))
+         (norm (learn-manifold-norm row)))
+    (if (= norm 0.0)
+        (learn-list->vector row)
+        (learn-list->vector
+         (learn-manifold-scale-row row (/ radius norm))))))
+
+(define (learn-manifold-project-hyperbolic space row)
+  (let* ((max-norm (learn-manifold-max-norm space))
+         (norm (learn-manifold-norm row)))
+    (if (or (= norm 0.0) (< norm max-norm))
+        (learn-list->vector row)
+        (learn-list->vector
+         (learn-manifold-scale-row row (/ max-norm norm))))))
+
+(define (riemannian-project space point)
+  (let* ((row (learn-validate-row-width
+               (learn-manifold-row point)
+               (geometry-space-dimension space)
+               "riemannian-project"))
+         (kind (geometry-space-kind space)))
+    (cond
+      ((equal? kind 'euclidean) (learn-list->vector row))
+      ((equal? kind 'spherical) (learn-manifold-project-spherical space row))
+      ((equal? kind 'hyperbolic) (learn-manifold-project-hyperbolic space row))
+      (else (error "riemannian-project" "unknown geometry kind" kind)))))
+
+(define (learn-riemannian-spherical-gradient point grad)
+  (let* ((p (learn-manifold-row point))
+         (g (learn-manifold-row grad))
+         (p2 (learn-dot p p)))
+    (if (= p2 0.0)
+        (learn-list->vector g)
+        (let ((normal-scale (/ (learn-dot p g) p2)))
+          (learn-list->vector
+           (learn-manifold-sub-row g
+                                   (learn-manifold-scale-row p normal-scale)))))))
+
+(define (learn-riemannian-hyperbolic-gradient point grad)
+  (let* ((p (learn-manifold-row point))
+         (g (learn-manifold-row grad))
+         (p2 (learn-dot p p))
+         (factor (* 0.25
+                    (max 0.0 (- 1.0 p2))
+                    (max 0.0 (- 1.0 p2)))))
+    (learn-list->vector (learn-manifold-scale-row g factor))))
+
+(define (riemannian-gradient space point euclidean-gradient)
+  (let* ((p (learn-validate-row-width
+             (learn-manifold-row point)
+             (geometry-space-dimension space)
+             "riemannian-gradient"))
+         (g (learn-validate-row-width
+             (learn-manifold-row euclidean-gradient)
+             (geometry-space-dimension space)
+             "riemannian-gradient"))
+         (kind (geometry-space-kind space)))
+    (cond
+      ((equal? kind 'euclidean) (learn-list->vector g))
+      ((equal? kind 'spherical) (learn-riemannian-spherical-gradient p g))
+      ((equal? kind 'hyperbolic) (learn-riemannian-hyperbolic-gradient p g))
+      (else (error "riemannian-gradient" "unknown geometry kind" kind)))))
+
+(define (riemannian-step space point euclidean-gradient lr)
+  (let* ((p (learn-manifold-row point))
+         (rg (learn-manifold-row
+              (riemannian-gradient space point euclidean-gradient)))
+         (updated (learn-manifold-sub-row
+                   p
+                   (learn-manifold-scale-row rg lr))))
+    (riemannian-project space updated)))

@@ -1,0 +1,11 @@
+[package]
+name = "eshkol-learn"
+version = "0.1.0"
+description = "High-level machine-learning and scientific workflow library for Eshkol"
+author = "Eshkol contributors"
+license = "MIT"
+entry = "examples/learn_xor.esk"
+sources = ["lib/*.esk", "lib/learn/*.esk", "examples/*.esk", "tests/*.esk"]
+eshkol_version = ">=1.2"
+
+[dependencies]

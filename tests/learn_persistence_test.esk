@@ -1,0 +1,77 @@
+(require learn)
+
+(mkdir-recursive ".tmp")
+
+(define (learn-test-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define (learn-test-approx label actual expected tol)
+  (learn-test-assert label (< (abs (- actual expected)) tol)))
+
+(define reload-linear-est (linear-regressor ':lr 0.001 ':epochs 1000))
+(fit reload-linear-est '((1.0) (2.0) (3.0) (4.0)) '(2.0 4.0 6.0 8.0))
+(save-estimator reload-linear-est ".tmp/eshkol_learn_linear_reload.json")
+(define reload-linear-loaded
+  (load-estimator ".tmp/eshkol_learn_linear_reload.json"))
+(learn-test-assert "linear kind"
+                   (equal? (estimator-kind reload-linear-loaded)
+                           'linear-regressor))
+(learn-test-assert "linear fitted" (estimator-fitted? reload-linear-loaded))
+(learn-test-approx "linear prediction"
+                   (car (predict reload-linear-loaded '((5.0))))
+                   10.0
+                   1.0)
+(display "linear regressor reloads with fitted state ... OK") (newline)
+
+(define reload-scaler-est (standard-scaler))
+(fit reload-scaler-est '((1.0) (2.0) (3.0)) '(0 0 0))
+(save-estimator reload-scaler-est ".tmp/eshkol_learn_scaler_reload.json")
+(define reload-scaler-loaded
+  (load-estimator ".tmp/eshkol_learn_scaler_reload.json"))
+(learn-test-assert "scaler kind"
+                   (equal? (estimator-kind reload-scaler-loaded)
+                           'standard-scaler))
+(learn-test-assert "scaler fitted" (estimator-fitted? reload-scaler-loaded))
+(learn-test-approx "scaler transform"
+                   (car (car (transform reload-scaler-loaded '((2.0)))))
+                   0.0
+                   0.000001)
+(display "standard scaler reloads with fitted state ... OK") (newline)
+
+(define reload-pca-est (pca ':n-components 1))
+(fit reload-pca-est '((1.0 10.0) (2.0 20.0) (3.0 30.0)) '(0 0 0))
+(save-estimator reload-pca-est ".tmp/eshkol_learn_pca_reload.json")
+(define reload-pca-loaded
+  (load-estimator ".tmp/eshkol_learn_pca_reload.json"))
+(learn-test-assert "pca kind"
+                   (equal? (estimator-kind reload-pca-loaded) 'pca))
+(learn-test-assert "pca fitted" (estimator-fitted? reload-pca-loaded))
+(learn-test-assert "pca transform width"
+                   (= (length (car (transform reload-pca-loaded '((2.0 20.0)))))
+                      1))
+(display "pca reloads with fitted state ... OK") (newline)
+
+(define reload-mlp-x '((0.0 0.0) (0.0 1.0) (1.0 0.0) (1.0 1.0)))
+(define reload-mlp-y '(0 1 1 0))
+(define reload-mlp-est
+  (mlp-classifier ':layers '(2 4 1)
+                  ':lr 0.5
+                  ':epochs 1500
+                  ':seed 42))
+(fit reload-mlp-est reload-mlp-x reload-mlp-y)
+(save-estimator reload-mlp-est ".tmp/eshkol_learn_mlp_reload.json")
+(define reload-mlp-loaded
+  (load-estimator ".tmp/eshkol_learn_mlp_reload.json"))
+(learn-test-assert "mlp kind"
+                   (equal? (estimator-kind reload-mlp-loaded)
+                           'mlp-classifier))
+(learn-test-assert "mlp fitted" (estimator-fitted? reload-mlp-loaded))
+(learn-test-assert "mlp reload score"
+                   (>= (score reload-mlp-loaded reload-mlp-x reload-mlp-y)
+                       1.0))
+(learn-test-assert "mlp reload proba"
+                   (= (length (predict-proba reload-mlp-loaded reload-mlp-x))
+                      4))
+(display "mlp classifier reloads with fitted state ... OK") (newline)

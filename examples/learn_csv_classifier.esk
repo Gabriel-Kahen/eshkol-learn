@@ -1,0 +1,26 @@
+(require learn)
+
+(define (main)
+  (define ds
+    (csv-dataset "fixtures/tiny_classification.csv"
+                 '("x1" "x2")
+                 "label"))
+
+  (define split
+    (train-valid-test-split (dataset-x ds) (dataset-y ds)
+                            ':valid-ratio 0.25
+                            ':test-ratio 0.25
+                            ':seed 7))
+
+  (define model
+    (make-pipeline
+     (imputer)
+     (standard-scaler)
+     (logistic-regressor ':lr 0.1 ':epochs 100)))
+
+  (fit model (car split) (car (cdr split)))
+  (display (score model
+                  (car (cdr (cdr split)))
+                  (car (cdr (cdr (cdr split)))))) (newline))
+
+(main)

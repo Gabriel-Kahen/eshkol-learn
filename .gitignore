@@ -1,0 +1,10 @@
+.tmp/
+runs/
+scratch/
+
+*.log
+*.tmp
+*.o
+*.dSYM/
+
+standalone_*

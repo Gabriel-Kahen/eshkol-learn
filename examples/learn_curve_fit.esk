@@ -1,0 +1,16 @@
+(require learn)
+
+(define xs '(0.0 1.0 2.0 3.0))
+(define ys '(1.0 3.0 5.0 7.0))
+
+(define (line params x)
+  (+ (vector-ref params 0) (* (vector-ref params 1) x)))
+
+(define (main)
+  (define fitted
+    (curve-fit line (vector 0.0 0.0) xs ys
+               ':optimizer (sgd-optimizer ':lr 0.05 ':max-iter 120)))
+
+  (display (predict fitted '(4.0 5.0))) (newline))
+
+(main)

@@ -1,0 +1,128 @@
+;;; learn.esk
+;;;
+;;; Convenience module for eshkol.learn.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.data)
+(require learn.preprocessing)
+(require learn.metrics)
+(require learn.optimizers)
+(require learn.callbacks)
+(require learn.training)
+(require learn.pipeline)
+(require learn.model_selection)
+(require learn.experiment)
+(require learn.linear)
+(require learn.neural)
+(require learn.cluster)
+(require learn.decomposition)
+(require learn.scientific)
+(require learn.geometry)
+(require learn.manifold)
+(require learn.sampling)
+(require learn.backends)
+(require learn.autodiff)
+(require learn.scientific_learning)
+(require learn.registry)
+
+(provide learn-pair learn-alist-get
+         fit predict predict-proba transform fit-transform score params set-params
+         estimator-kind estimator-state estimator-fitted?
+         estimator-method estimator-has-method?
+         save-estimator load-estimator
+         train-valid-test-split shuffle-split k-fold-split batch-dataset
+         tensor-dataset csv-dataset dataset? dataset-x dataset-y dataset-size
+         dataset-batches dataset-shape dataset-summary dataset-diagnostics
+         validate-dataset validate-feature-width dataframe->xy
+         standard-scaler minmax-scaler label-encoder one-hot-encoder imputer
+         accuracy precision recall f1 confusion-matrix log-loss top-k-accuracy
+         mse rmse mae r2-score loss-history gradient-norm-history learning-curve
+         train-loop make-trainer training-step validation-step epoch-result history
+         compile-model riemannian-train-loop autodiff-train-loop
+         early-stopping checkpoint progress-log metric-logger terminate-on-nan
+         lr-scheduler-callback
+         sgd-optimizer adam-optimizer lbfgs-optimizer conjugate-gradient-optimizer
+         riemannian-sgd-optimizer optimizer? optimizer-kind optimizer-params
+         autodiff-sgd-optimizer autodiff-adam-optimizer optimizer-minimize
+         make-pipeline pipeline-step grid-search random-search cross-validate
+         best-estimator best-params validation-report
+         linear-regressor logistic-regressor mlp-regressor mlp-classifier
+         kmeans pca nearest-neighbors
+         curve-fit ode-parameter-fit differentiable-simulator-fit
+         geometry-space euclidean-space spherical-space hyperbolic-space
+         geometry-space? geometry-space-kind geometry-space-dimension
+         geometry-space-curvature geometry-space-params
+         geometry-distance mixed-geometry-distance geometry-summary
+         mixed-geometry-summary geometry-distance-matrix
+         geometric-regularization
+         riemannian-project riemannian-gradient riemannian-step
+         born-probabilities born-sample-index born-sample
+         born-expectation born-sampling-summary
+         learn-backend classical-learn-backend simulator-learn-backend
+         quantum-learn-backend learn-backend? learn-backend-kind
+         learn-backend-name learn-backend-capabilities learn-backend-params
+         learn-backend-supports? learn-backend-summary
+         learn-backend-handler learn-backend-call
+         tensor-mse-loss tensor-mae-loss tensor-binary-cross-entropy
+         tensor-l2-regularization
+         dense-layer activation-layer sequential-model
+         learn-layer? learn-layer-kind learn-layer-params
+         learn-model? learn-model-layers
+         layer-param-count model-param-count model-zero-params
+         model-init-params model-forward model-predict
+         model-mse-loss model-binary-cross-entropy-loss
+         simulator-predictions simulator-residuals simulator-loss
+         simulator-objective
+         time-series-dataset time-series? time-series-times time-series-values
+         time-series-params time-series-size time-series-summary
+         time-series-windowed-dataset time-series-linear-params
+         time-series-linear-fit time-series-parameter-fit
+         ode-time-series-fit
+         state-space-dataset state-space? state-space-times state-space-states
+         state-space-params state-space-size state-space-dimension
+         state-space-summary state-space-transition-pairs
+         ode-euler-step ode-euler-simulate
+         dynamics-residual-loss conservation-loss boundary-condition-loss
+         physics-informed-loss
+         shape-schema shape-schema? shape-schema-name shape-schema-dims
+         shape-schema-rank shape-schema-params shape-compatible?
+         shape-schema-summary
+         parameter-schema parameter-schema? parameter-schema-names
+         parameter-schema-initial parameter-schema-count parameter-schema-bounds
+         validate-parameter-vector parameter-schema-summary
+         model-shape-summary model-parameter-schema
+         experiment-registry experiment-registry?
+         registry-name registry-params registry-datasets registry-runs
+         registry-lineages registry-benchmarks registry-backends
+         registry-add-dataset! registry-add-run! registry-add-lineage!
+         registry-add-benchmark! registry-add-backend! registry-summary
+         write-registry-summary
+         dataset-manifest dataset-manifest? dataset-manifest-name
+         dataset-manifest-kind dataset-manifest-summary
+         dataset-manifest-params dataset-manifest-source
+         dataset-manifest-version dataset-manifest-schema
+         dataset-manifest-tags dataset-manifest->alist
+         dataset-manifest-from-dataset time-series-manifest
+         state-space-manifest log-dataset-manifest
+         run-lineage run-lineage? run-lineage-child
+         run-lineage-parents run-lineage-params run-lineage-summary
+         log-run-lineage
+         compiler-backend compiler-backend-mode compiler-backend-summary
+         benchmark-case benchmark-case? benchmark-case-name
+         benchmark-case-workload benchmark-case-params
+         benchmark-case-summary
+         benchmark-result benchmark-result? benchmark-result-case
+         benchmark-result-backend benchmark-result-output
+         benchmark-result-metrics benchmark-result-status
+         benchmark-result-params benchmark-result-summary
+         benchmark-suite benchmark-suite? benchmark-suite-name
+         benchmark-suite-cases benchmark-suite-params
+         benchmark-suite-summary
+         run-benchmark-case compare-backends compare-compiler-backends
+         backend-comparison? backend-comparison-case
+         backend-comparison-results backend-comparison-consistent?
+         backend-comparison-params backend-comparison-summary
+         run-benchmark-suite benchmark-report log-benchmark-result
+         start-run end-run log-param log-metric log-artifact run-summary
+         compare-runs replay-run)

@@ -1,0 +1,355 @@
+;;; learn/preprocessing.esk
+;;;
+;;; Reusable transformers for tabular workflows.
+
+(require learn.core)
+(require learn.protocols)
+
+(provide standard-scaler minmax-scaler label-encoder one-hot-encoder
+         imputer)
+
+(define (learn-row->features row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-feature-rows x)
+  (map learn-row->features (learn-seq->list x)))
+
+(define (learn-column rows idx)
+  (if (null? rows)
+      '()
+      (cons (list-ref (car rows) idx)
+            (learn-column (cdr rows) idx))))
+
+(define (learn-column-stats rows idx)
+  (let ((col (learn-column rows idx)))
+    (list (learn-pair 'mean (learn-list-mean col))
+          (learn-pair 'std (learn-list-std col))
+          (learn-pair 'min (learn-list-min col))
+          (learn-pair 'max (learn-list-max col)))))
+
+(define (learn-column-stats-vector rows idx)
+  (let ((col (learn-column rows idx)))
+    (vector (learn-list-mean col)
+            (learn-list-std col)
+            (learn-list-min col)
+            (learn-list-max col))))
+
+(define (learn-columns-stats rows idx n)
+  (if (>= idx n)
+      '()
+      (cons (learn-column-stats rows idx)
+            (learn-columns-stats rows (+ idx 1) n))))
+
+(define (learn-columns-stats-vector-list rows idx n)
+  (if (>= idx n)
+      '()
+      (cons (learn-column-stats-vector rows idx)
+            (learn-columns-stats-vector-list rows (+ idx 1) n))))
+
+(define (learn-columns-stats-vector rows idx n)
+  (learn-list->vector (learn-columns-stats-vector-list rows idx n)))
+
+(define (learn-scaler-state-stats state context)
+  (if (and (vector? state) (>= (vector-length state) 3))
+      (vector-ref state 1)
+      (error context "estimator is not fitted")))
+
+(define (learn-scaler-state-width state context)
+  (if (and (vector? state) (>= (vector-length state) 3))
+      (vector-ref state 2)
+      (error context "estimator is not fitted")))
+
+(define (learn-transform-row-standard row stats with-mean with-std)
+  (if (or (null? row) (null? stats))
+      '()
+      (let* ((stat (car stats))
+             (mu (learn-alist-get stat 'mean 0.0))
+             (std (learn-alist-get stat 'std 1.0))
+             (centered (if with-mean (- (car row) mu) (car row)))
+             (scaled (if with-std
+                         (if (= std 0.0) 0.0 (/ centered std))
+                         centered)))
+        (cons scaled
+              (learn-transform-row-standard (cdr row) (cdr stats)
+                                            with-mean with-std)))))
+
+(define (learn-transform-row-standard-vector row stats idx with-mean with-std)
+  (if (null? row)
+      '()
+      (let* ((stat (vector-ref stats idx))
+             (mu (vector-ref stat 0))
+             (std (vector-ref stat 1))
+             (centered (if with-mean (- (car row) mu) (car row)))
+             (scaled (if with-std
+                         (if (= std 0.0) 0.0 (/ centered std))
+                         centered)))
+        (cons scaled
+              (learn-transform-row-standard-vector (cdr row) stats (+ idx 1)
+                                                   with-mean with-std)))))
+
+(define (learn-standard-fit estimator x y opts)
+  (let* ((rows (learn-feature-rows x))
+         (n (learn-validate-rectangular-rows rows "standard-scaler fit"))
+         (stats (learn-columns-stats-vector rows 0 n)))
+    (learn-fitted-estimator-like
+     estimator
+     (vector 'standard-scaler-state stats n))))
+
+(define (learn-standard-transform estimator x opts)
+  (let* ((state (learn-estimator-state estimator))
+         (stats (learn-scaler-state-stats state "standard-scaler transform"))
+         (n (learn-scaler-state-width state "standard-scaler transform"))
+         (with-mean (learn-alist-get (learn-estimator-params estimator) ':with-mean #t))
+         (with-std (learn-alist-get (learn-estimator-params estimator) ':with-std #t)))
+    (map (lambda (row)
+           (learn-transform-row-standard-vector
+            (learn-validate-row-width (learn-row->features row)
+                                      n
+                                      "standard-scaler transform")
+            stats 0 with-mean with-std))
+         (learn-seq->list x))))
+
+(define (standard-scaler . opts)
+  (learn-make-estimator
+   'standard-scaler
+   (list (learn-pair 'fit learn-standard-fit)
+         (learn-pair 'transform learn-standard-transform))
+   (list (learn-pair ':with-mean (learn-option opts ':with-mean #t))
+         (learn-pair ':with-std (learn-option opts ':with-std #t)))
+   '()))
+
+(define (learn-transform-row-minmax row stats range-min range-max)
+  (if (or (null? row) (null? stats))
+      '()
+      (let* ((stat (car stats))
+             (lo (learn-alist-get stat 'min 0.0))
+             (hi (learn-alist-get stat 'max 1.0))
+             (span (- hi lo))
+             (unit (if (= span 0.0) 0.0 (/ (- (car row) lo) span)))
+             (scaled (+ range-min (* unit (- range-max range-min)))))
+        (cons scaled
+              (learn-transform-row-minmax (cdr row) (cdr stats)
+                                          range-min range-max)))))
+
+(define (learn-transform-row-minmax-vector row stats idx range-min range-max)
+  (if (null? row)
+      '()
+      (let* ((stat (vector-ref stats idx))
+             (lo (vector-ref stat 2))
+             (hi (vector-ref stat 3))
+             (span (- hi lo))
+             (unit (if (= span 0.0) 0.0 (/ (- (car row) lo) span)))
+             (scaled (+ range-min (* unit (- range-max range-min)))))
+        (cons scaled
+              (learn-transform-row-minmax-vector (cdr row) stats (+ idx 1)
+                                                 range-min range-max)))))
+
+(define (learn-minmax-fit estimator x y opts)
+  (let* ((rows (learn-feature-rows x))
+         (n (learn-validate-rectangular-rows rows "minmax-scaler fit"))
+         (stats (learn-columns-stats-vector rows 0 n)))
+    (learn-fitted-estimator-like
+     estimator
+     (vector 'minmax-scaler-state stats n))))
+
+(define (learn-minmax-transform estimator x opts)
+  (let* ((state (learn-estimator-state estimator))
+         (stats (learn-scaler-state-stats state "minmax-scaler transform"))
+         (n (learn-scaler-state-width state "minmax-scaler transform"))
+         (range-min (learn-alist-get (learn-estimator-params estimator) ':min 0.0))
+         (range-max (learn-alist-get (learn-estimator-params estimator) ':max 1.0)))
+    (map (lambda (row)
+           (learn-transform-row-minmax-vector
+            (learn-validate-row-width (learn-row->features row)
+                                      n
+                                      "minmax-scaler transform")
+            stats 0 range-min range-max))
+         (learn-seq->list x))))
+
+(define (minmax-scaler . opts)
+  (learn-make-estimator
+   'minmax-scaler
+   (list (learn-pair 'fit learn-minmax-fit)
+         (learn-pair 'transform learn-minmax-transform))
+   (list (learn-pair ':min (learn-option opts ':min 0.0))
+         (learn-pair ':max (learn-option opts ':max 1.0)))
+   '()))
+
+(define (learn-label-fit estimator x y opts)
+  (let ((classes (learn-unique (learn-seq->list x))))
+    (learn-fitted-estimator-like estimator (list (learn-pair 'classes classes)))))
+
+(define (learn-label-transform estimator x opts)
+  (let ((classes (learn-alist-get (learn-estimator-state estimator) 'classes '())))
+    (map (lambda (v) (learn-list-index-of classes v 0))
+         (learn-seq->list x))))
+
+(define (label-encoder)
+  (learn-make-estimator
+   'label-encoder
+   (list (learn-pair 'fit learn-label-fit)
+         (learn-pair 'transform learn-label-transform))
+   '()
+   '()))
+
+(define (learn-one-hot-row idx n)
+  (letrec ((loop (lambda (i)
+                   (if (>= i n)
+                       '()
+                       (cons (if (= i idx) 1.0 0.0)
+                             (loop (+ i 1)))))))
+    (loop 0)))
+
+(define (learn-one-hot-transform estimator x opts)
+  (let* ((classes (learn-alist-get (learn-estimator-state estimator) 'classes '()))
+         (n (length classes)))
+    (map (lambda (v)
+           (learn-one-hot-row (learn-list-index-of classes v 0) n))
+         (learn-seq->list x))))
+
+(define (one-hot-encoder)
+  (learn-make-estimator
+   'one-hot-encoder
+   (list (learn-pair 'fit learn-label-fit)
+         (learn-pair 'transform learn-one-hot-transform))
+   '()
+   '()))
+
+(define (learn-missing? v)
+  (or (null? v) (eq? v #f)))
+
+(define (learn-column-non-missing rows idx)
+  (let ((col (learn-column rows idx)))
+    (letrec ((loop (lambda (xs)
+                     (cond
+                       ((null? xs) '())
+                       ((learn-missing? (car xs)) (loop (cdr xs)))
+                       (else (cons (car xs) (loop (cdr xs))))))))
+      (loop col))))
+
+(define (learn-imputer-fill rows idx strategy constant)
+  (let ((vals (learn-column-non-missing rows idx)))
+    (cond
+      ((null? vals) constant)
+      ((equal? strategy 'constant) constant)
+      ((equal? strategy 'min) (learn-list-min vals))
+      ((equal? strategy 'max) (learn-list-max vals))
+      (else (learn-list-mean vals)))))
+
+(define (learn-imputer-fills rows idx n strategy constant)
+  (if (>= idx n)
+      '()
+      (cons (learn-imputer-fill rows idx strategy constant)
+            (learn-imputer-fills rows (+ idx 1) n strategy constant))))
+
+(define (learn-imputer-fit estimator x y opts)
+  (let* ((rows (learn-feature-rows x))
+         (n (if (null? rows) 0 (length (car rows))))
+         (strategy (learn-alist-get (learn-estimator-params estimator) ':strategy 'mean))
+         (constant (learn-alist-get (learn-estimator-params estimator) ':fill-value 0.0))
+         (fills (learn-imputer-fills rows 0 n strategy constant)))
+    (learn-fitted-estimator-like estimator (list (learn-pair 'fills fills)))))
+
+(define (learn-imputer-row row fills)
+  (if (or (null? row) (null? fills))
+      '()
+      (cons (if (learn-missing? (car row)) (car fills) (car row))
+            (learn-imputer-row (cdr row) (cdr fills)))))
+
+(define (learn-imputer-transform estimator x opts)
+  (let ((fills (learn-alist-get (learn-estimator-state estimator) 'fills '())))
+    (map (lambda (row) (learn-imputer-row (learn-row->features row) fills))
+         (learn-seq->list x))))
+
+(define (imputer . opts)
+  (learn-make-estimator
+   'imputer
+   (list (learn-pair 'fit learn-imputer-fit)
+         (learn-pair 'transform learn-imputer-transform))
+   (list (learn-pair ':strategy (learn-option opts ':strategy 'mean))
+         (learn-pair ':fill-value (learn-option opts ':fill-value 0.0)))
+   '()))
+
+(define (learn-list-of-lists->vector-of-vectors rows)
+  (if (null? rows)
+      '()
+      (cons (list->vector (car rows))
+            (learn-list-of-lists->vector-of-vectors (cdr rows)))))
+
+(define (learn-scaler-load-state tag state)
+  (vector tag
+          (list->vector (learn-list-of-lists->vector-of-vectors
+                         (list-ref state 1)))
+          (list-ref state 2)))
+
+(define (learn-standard-load params state fitted?)
+  (let ((est (standard-scaler)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (learn-scaler-load-state 'standard-scaler-state state))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(define (learn-minmax-load params state fitted?)
+  (let ((est (minmax-scaler)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (learn-scaler-load-state 'minmax-scaler-state state))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(define (learn-state-field state key default)
+  (cond
+    ((hash-table? state) (hash-ref state (symbol->string key) default))
+    (else (learn-alist-get state key default))))
+
+(define (learn-label-load params state fitted?)
+  (let ((est (label-encoder)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (list (learn-pair 'classes
+                             (learn-state-field state 'classes '()))))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(define (learn-one-hot-load params state fitted?)
+  (let ((est (one-hot-encoder)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (list (learn-pair 'classes
+                             (learn-state-field state 'classes '()))))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(define (learn-imputer-load params state fitted?)
+  (let ((est (imputer)))
+    (learn-set-estimator-params! est params)
+    (if fitted?
+        (begin
+          (learn-set-estimator-state!
+           est
+           (list (learn-pair 'fills
+                             (learn-state-field state 'fills '()))))
+          (learn-set-estimator-fitted! est #t)))
+    est))
+
+(register-estimator-loader 'standard-scaler learn-standard-load)
+(register-estimator-loader 'minmax-scaler learn-minmax-load)
+(register-estimator-loader 'label-encoder learn-label-load)
+(register-estimator-loader 'one-hot-encoder learn-one-hot-load)
+(register-estimator-loader 'imputer learn-imputer-load)

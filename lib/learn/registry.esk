@@ -1,0 +1,628 @@
+;;; learn/registry.esk
+;;;
+;;; Experiment registry and benchmark harness for scientific learning workflows.
+
+(require learn.core)
+(require learn.data)
+(require learn.backends)
+(require learn.scientific_learning)
+
+(provide experiment-registry experiment-registry?
+         registry-name registry-params registry-datasets registry-runs
+         registry-lineages registry-benchmarks registry-backends
+         registry-add-dataset! registry-add-run! registry-add-lineage!
+         registry-add-benchmark! registry-add-backend! registry-summary
+         write-registry-summary
+         dataset-manifest dataset-manifest? dataset-manifest-name
+         dataset-manifest-kind dataset-manifest-summary
+         dataset-manifest-params dataset-manifest-source
+         dataset-manifest-version dataset-manifest-schema
+         dataset-manifest-tags dataset-manifest->alist
+         dataset-manifest-from-dataset time-series-manifest
+         state-space-manifest log-dataset-manifest
+         run-lineage run-lineage? run-lineage-child
+         run-lineage-parents run-lineage-params run-lineage-summary
+         log-run-lineage
+         compiler-backend compiler-backend-mode compiler-backend-summary
+         benchmark-case benchmark-case? benchmark-case-name
+         benchmark-case-workload benchmark-case-params
+         benchmark-case-summary
+         benchmark-result benchmark-result? benchmark-result-case
+         benchmark-result-backend benchmark-result-output
+         benchmark-result-metrics benchmark-result-status
+         benchmark-result-params benchmark-result-summary
+         benchmark-suite benchmark-suite? benchmark-suite-name
+         benchmark-suite-cases benchmark-suite-params
+         benchmark-suite-summary
+         run-benchmark-case compare-backends compare-compiler-backends
+         backend-comparison? backend-comparison-case
+         backend-comparison-results backend-comparison-consistent?
+         backend-comparison-params backend-comparison-summary
+         run-benchmark-suite benchmark-report log-benchmark-result)
+
+(define learn-experiment-registry-tag 'learn-experiment-registry)
+(define learn-dataset-manifest-tag 'learn-dataset-manifest)
+(define learn-run-lineage-tag 'learn-run-lineage)
+(define learn-benchmark-case-tag 'learn-benchmark-case)
+(define learn-benchmark-result-tag 'learn-benchmark-result)
+(define learn-benchmark-suite-tag 'learn-benchmark-suite)
+(define learn-backend-comparison-tag 'learn-backend-comparison)
+(define learn-no-expected-tag '__learn-no-expected__)
+
+(define (learn-registry-path-join a b)
+  (string-append a "/" b))
+
+;;; ---------------------------------------------------------------------------
+;;; Small JSONL writer used for run-local manifest files.
+;;; ---------------------------------------------------------------------------
+
+(define (learn-registry-json-escape s)
+  s)
+
+(define (learn-registry-json-list-values xs)
+  (cond
+    ((null? xs) "")
+    ((null? (cdr xs)) (learn-registry-json-value (car xs)))
+    (else
+     (string-append (learn-registry-json-value (car xs))
+                    ","
+                    (learn-registry-json-list-values (cdr xs))))))
+
+(define (learn-registry-json-vector-values v i n)
+  (cond
+    ((>= i n) "")
+    ((= i (- n 1)) (learn-registry-json-value (vector-ref v i)))
+    (else
+     (string-append (learn-registry-json-value (vector-ref v i))
+                    ","
+                    (learn-registry-json-vector-values v (+ i 1) n)))))
+
+(define (learn-registry-json-value value)
+  (cond
+    ((string? value)
+     (string-append "\"" (learn-registry-json-escape value) "\""))
+    ((number? value) (number->string value))
+    ((boolean? value) (if value "true" "false"))
+    ((null? value) "null")
+    ((symbol? value) (string-append "\"" (symbol->string value) "\""))
+    ((vector? value)
+     (string-append "["
+                    (learn-registry-json-vector-values
+                     value
+                     0
+                     (vector-length value))
+                    "]"))
+    ((pair? value)
+     (string-append "["
+                    (learn-registry-json-list-values value)
+                    "]"))
+    (else "\"#<value>\"")))
+
+(define (learn-registry-json-key key)
+  (cond
+    ((string? key) key)
+    ((symbol? key) (symbol->string key))
+    (else (learn-registry-json-value key))))
+
+(define (learn-registry-json-field pair)
+  (string-append "\""
+                 (learn-registry-json-key (learn-pair-key pair))
+                 "\":"
+                 (learn-registry-json-value (learn-pair-value pair))))
+
+(define (learn-registry-json-fields fields)
+  (cond
+    ((null? fields) "")
+    ((null? (cdr fields)) (learn-registry-json-field (car fields)))
+    (else
+     (string-append (learn-registry-json-field (car fields))
+                    ","
+                    (learn-registry-json-fields (cdr fields))))))
+
+(define (learn-registry-json-object fields)
+  (string-append "{" (learn-registry-json-fields fields) "}"))
+
+(define (learn-registry-json-object-line fields)
+  (string-append (learn-registry-json-object fields) "\n"))
+
+;;; ---------------------------------------------------------------------------
+;;; Dataset manifests
+;;; ---------------------------------------------------------------------------
+
+(define (dataset-manifest name kind summary . opts)
+  (vector learn-dataset-manifest-tag name kind summary opts))
+
+(define (dataset-manifest? x)
+  (and (vector? x)
+       (>= (vector-length x) 5)
+       (eq? (vector-ref x 0) learn-dataset-manifest-tag)))
+
+(define (dataset-manifest-name manifest) (vector-ref manifest 1))
+(define (dataset-manifest-kind manifest) (vector-ref manifest 2))
+(define (dataset-manifest-summary manifest) (vector-ref manifest 3))
+(define (dataset-manifest-params manifest) (vector-ref manifest 4))
+
+(define (dataset-manifest-source manifest)
+  (learn-option (dataset-manifest-params manifest) ':source #f))
+
+(define (dataset-manifest-version manifest)
+  (learn-option (dataset-manifest-params manifest) ':version "0.1"))
+
+(define (dataset-manifest-schema manifest)
+  (learn-option (dataset-manifest-params manifest) ':schema '()))
+
+(define (dataset-manifest-tags manifest)
+  (learn-option (dataset-manifest-params manifest) ':tags '()))
+
+(define (dataset-manifest->alist manifest)
+  (list (learn-pair 'name (dataset-manifest-name manifest))
+        (learn-pair 'kind (dataset-manifest-kind manifest))
+        (learn-pair 'version (dataset-manifest-version manifest))
+        (learn-pair 'source (dataset-manifest-source manifest))
+        (learn-pair 'schema (dataset-manifest-schema manifest))
+        (learn-pair 'tags (dataset-manifest-tags manifest))
+        (learn-pair 'summary (dataset-manifest-summary manifest))))
+
+(define (dataset-manifest-from-dataset name ds . opts)
+  (apply dataset-manifest
+         (cons name
+               (cons 'tabular
+                     (cons (dataset-summary ds) opts)))))
+
+(define (time-series-manifest name ts . opts)
+  (apply dataset-manifest
+         (cons name
+               (cons 'time-series
+                     (cons (time-series-summary ts) opts)))))
+
+(define (state-space-manifest name ss . opts)
+  (apply dataset-manifest
+         (cons name
+               (cons 'state-space
+                     (cons (state-space-summary ss) opts)))))
+
+(define (log-dataset-manifest ctx manifest)
+  (append-file
+   (learn-registry-path-join (run-context-dir ctx) "dataset-manifests.jsonl")
+   (learn-registry-json-object-line (dataset-manifest->alist manifest)))
+  ctx)
+
+;;; ---------------------------------------------------------------------------
+;;; Run lineage
+;;; ---------------------------------------------------------------------------
+
+(define (run-lineage child-run parents . opts)
+  (vector learn-run-lineage-tag child-run parents opts))
+
+(define (run-lineage? x)
+  (and (vector? x)
+       (>= (vector-length x) 4)
+       (eq? (vector-ref x 0) learn-run-lineage-tag)))
+
+(define (run-lineage-child lineage) (vector-ref lineage 1))
+(define (run-lineage-parents lineage) (vector-ref lineage 2))
+(define (run-lineage-params lineage) (vector-ref lineage 3))
+
+(define (run-lineage-summary lineage)
+  (list (learn-pair 'child (run-lineage-child lineage))
+        (learn-pair 'parents (run-lineage-parents lineage))
+        (learn-pair 'dataset
+                    (learn-option (run-lineage-params lineage)
+                                  ':dataset
+                                  #f))
+        (learn-pair 'backend
+                    (learn-option (run-lineage-params lineage)
+                                  ':backend
+                                  #f))
+        (learn-pair 'purpose
+                    (learn-option (run-lineage-params lineage)
+                                  ':purpose
+                                  'experiment))
+        (learn-pair 'tags
+                    (learn-option (run-lineage-params lineage)
+                                  ':tags
+                                  '()))))
+
+(define (log-run-lineage ctx lineage)
+  (append-file
+   (learn-registry-path-join (run-context-dir ctx) "lineage.jsonl")
+   (learn-registry-json-object-line (run-lineage-summary lineage)))
+  ctx)
+
+;;; ---------------------------------------------------------------------------
+;;; Registry
+;;; ---------------------------------------------------------------------------
+
+(define (experiment-registry name . opts)
+  (vector learn-experiment-registry-tag name opts '() '() '() '() '()))
+
+(define (experiment-registry? x)
+  (and (vector? x)
+       (>= (vector-length x) 8)
+       (eq? (vector-ref x 0) learn-experiment-registry-tag)))
+
+(define (registry-name registry) (vector-ref registry 1))
+(define (registry-params registry) (vector-ref registry 2))
+(define (registry-datasets registry) (reverse (vector-ref registry 3)))
+(define (registry-runs registry) (reverse (vector-ref registry 4)))
+(define (registry-lineages registry) (reverse (vector-ref registry 5)))
+(define (registry-benchmarks registry) (reverse (vector-ref registry 6)))
+(define (registry-backends registry) (reverse (vector-ref registry 7)))
+
+(define (registry-add-dataset! registry manifest)
+  (vector-set! registry 3 (cons manifest (vector-ref registry 3)))
+  registry)
+
+(define (registry-add-run! registry run-summary)
+  (vector-set! registry 4 (cons run-summary (vector-ref registry 4)))
+  registry)
+
+(define (registry-add-lineage! registry lineage)
+  (vector-set! registry 5 (cons lineage (vector-ref registry 5)))
+  registry)
+
+(define (registry-add-benchmark! registry benchmark)
+  (vector-set! registry 6 (cons benchmark (vector-ref registry 6)))
+  registry)
+
+(define (registry-add-backend! registry backend)
+  (vector-set! registry 7 (cons backend (vector-ref registry 7)))
+  registry)
+
+(define (learn-registry-dataset-summaries manifests)
+  (if (null? manifests)
+      '()
+      (cons (dataset-manifest->alist (car manifests))
+            (learn-registry-dataset-summaries (cdr manifests)))))
+
+(define (learn-registry-lineage-summaries lineages)
+  (if (null? lineages)
+      '()
+      (cons (run-lineage-summary (car lineages))
+            (learn-registry-lineage-summaries (cdr lineages)))))
+
+(define (learn-registry-backend-summaries backends)
+  (if (null? backends)
+      '()
+      (cons (if (and (learn-backend? (car backends))
+                     (equal? (learn-backend-kind (car backends)) 'compiler))
+                (compiler-backend-summary (car backends))
+                (if (learn-backend? (car backends))
+                    (learn-backend-summary (car backends))
+                    (car backends)))
+            (learn-registry-backend-summaries (cdr backends)))))
+
+(define (learn-benchmark-backend-name backend)
+  (if (learn-backend? backend)
+      (learn-backend-name backend)
+      backend))
+
+(define (learn-benchmark-backend-kind backend)
+  (if (learn-backend? backend)
+      (learn-backend-kind backend)
+      'unknown))
+
+(define (learn-benchmark-backend-mode backend)
+  (if (and (learn-backend? backend)
+           (equal? (learn-backend-kind backend) 'compiler))
+      (compiler-backend-mode backend)
+      #f))
+
+(define (learn-benchmark-backend-summary backend)
+  (if (and (learn-backend? backend)
+           (equal? (learn-backend-kind backend) 'compiler))
+      (compiler-backend-summary backend)
+      (if (learn-backend? backend)
+          (learn-backend-summary backend)
+          backend)))
+
+(define (learn-registry-benchmark-summary benchmark)
+  (cond
+    ((backend-comparison? benchmark)
+     (backend-comparison-summary benchmark))
+    ((benchmark-result? benchmark)
+     (benchmark-result-summary benchmark))
+    ((benchmark-case? benchmark)
+     (benchmark-case-summary benchmark))
+    (else benchmark)))
+
+(define (learn-registry-benchmark-summaries benchmarks)
+  (if (null? benchmarks)
+      '()
+      (cons (learn-registry-benchmark-summary (car benchmarks))
+            (learn-registry-benchmark-summaries (cdr benchmarks)))))
+
+(define (registry-summary registry)
+  (list (learn-pair 'name (registry-name registry))
+        (learn-pair 'params (registry-params registry))
+        (learn-pair 'dataset-count (length (registry-datasets registry)))
+        (learn-pair 'run-count (length (registry-runs registry)))
+        (learn-pair 'lineage-count (length (registry-lineages registry)))
+        (learn-pair 'benchmark-count (length (registry-benchmarks registry)))
+        (learn-pair 'backend-count (length (registry-backends registry)))
+        (learn-pair 'datasets
+                    (learn-registry-dataset-summaries
+                     (registry-datasets registry)))
+        (learn-pair 'lineage
+                    (learn-registry-lineage-summaries
+                     (registry-lineages registry)))
+        (learn-pair 'benchmarks
+                    (learn-registry-benchmark-summaries
+                     (registry-benchmarks registry)))
+        (learn-pair 'backends
+                    (learn-registry-backend-summaries
+                     (registry-backends registry)))))
+
+(define (write-registry-summary registry filename)
+  (write-file filename
+              (learn-registry-json-object
+               (registry-summary registry)))
+  filename)
+
+;;; ---------------------------------------------------------------------------
+;;; Compiler/backend descriptors
+;;; ---------------------------------------------------------------------------
+
+(define (compiler-backend name mode . opts)
+  (apply learn-backend
+         (cons 'compiler
+               (cons name
+                     (cons (learn-option
+                            opts
+                            ':capabilities
+                            '(compiler-comparison scientific-learning))
+                           (cons ':mode (cons mode opts)))))))
+
+(define (compiler-backend-mode backend)
+  (learn-option (learn-backend-params backend) ':mode 'unknown))
+
+(define (compiler-backend-summary backend)
+  (list (learn-pair 'kind (learn-backend-kind backend))
+        (learn-pair 'name (learn-backend-name backend))
+        (learn-pair 'mode (compiler-backend-mode backend))
+        (learn-pair 'capabilities (learn-backend-capabilities backend))))
+
+;;; ---------------------------------------------------------------------------
+;;; Benchmark harness
+;;; ---------------------------------------------------------------------------
+
+(define (benchmark-case name workload . opts)
+  (vector learn-benchmark-case-tag name workload opts))
+
+(define (benchmark-case? x)
+  (and (vector? x)
+       (>= (vector-length x) 4)
+       (eq? (vector-ref x 0) learn-benchmark-case-tag)))
+
+(define (benchmark-case-name bench-case) (vector-ref bench-case 1))
+(define (benchmark-case-workload bench-case) (vector-ref bench-case 2))
+(define (benchmark-case-params bench-case) (vector-ref bench-case 3))
+
+(define (benchmark-case-summary bench-case)
+  (list (learn-pair 'name (benchmark-case-name bench-case))
+        (learn-pair 'repeats
+                    (learn-option (benchmark-case-params bench-case)
+                                  ':repeats
+                                  1))
+        (learn-pair 'tags
+                    (learn-option (benchmark-case-params bench-case)
+                                  ':tags
+                                  '()))
+        (learn-pair 'dataset
+                    (let ((manifest
+                           (learn-option (benchmark-case-params bench-case)
+                                         ':dataset-manifest
+                                         #f)))
+                      (if (dataset-manifest? manifest)
+                          (dataset-manifest-name manifest)
+                          manifest)))))
+
+(define (benchmark-result case-name backend output metrics status . opts)
+  (vector learn-benchmark-result-tag case-name backend output metrics status opts))
+
+(define (benchmark-result? x)
+  (and (vector? x)
+       (>= (vector-length x) 7)
+       (eq? (vector-ref x 0) learn-benchmark-result-tag)))
+
+(define (benchmark-result-case result) (vector-ref result 1))
+(define (benchmark-result-backend result) (vector-ref result 2))
+(define (benchmark-result-output result) (vector-ref result 3))
+(define (benchmark-result-metrics result) (vector-ref result 4))
+(define (benchmark-result-status result) (vector-ref result 5))
+(define (benchmark-result-params result) (vector-ref result 6))
+
+(define (benchmark-result-summary result)
+  (list (learn-pair 'case (benchmark-result-case result))
+        (learn-pair 'backend (learn-benchmark-backend-name
+                              (benchmark-result-backend result)))
+        (learn-pair 'backend-kind (learn-benchmark-backend-kind
+                                   (benchmark-result-backend result)))
+        (learn-pair 'backend-mode (learn-benchmark-backend-mode
+                                   (benchmark-result-backend result)))
+        (learn-pair 'status (benchmark-result-status result))
+        (learn-pair 'output (benchmark-result-output result))
+        (learn-pair 'metrics (benchmark-result-metrics result))))
+
+(define (benchmark-suite name cases . opts)
+  (vector learn-benchmark-suite-tag name cases opts))
+
+(define (benchmark-suite? x)
+  (and (vector? x)
+       (>= (vector-length x) 4)
+       (eq? (vector-ref x 0) learn-benchmark-suite-tag)))
+
+(define (benchmark-suite-name suite) (vector-ref suite 1))
+(define (benchmark-suite-cases suite) (vector-ref suite 2))
+(define (benchmark-suite-params suite) (vector-ref suite 3))
+
+(define (benchmark-suite-summary suite)
+  (list (learn-pair 'name (benchmark-suite-name suite))
+        (learn-pair 'case-count (length (benchmark-suite-cases suite)))
+        (learn-pair 'tags
+                    (learn-option (benchmark-suite-params suite)
+                                  ':tags
+                                  '()))))
+
+(define (learn-benchmark-default-metrics output elapsed-ms repeats)
+  (list (learn-pair 'elapsed-ms elapsed-ms)
+        (learn-pair 'repeats repeats)))
+
+(define (learn-benchmark-run-once bench-case backend opts)
+  (let ((handler (if (learn-backend? backend)
+                     (learn-backend-handler backend 'benchmark)
+                     #f)))
+    (if handler
+        (handler bench-case opts)
+        ((benchmark-case-workload bench-case) backend opts))))
+
+(define (learn-benchmark-repeat bench-case backend opts repeats last-output)
+  (if (<= repeats 0)
+      last-output
+      (learn-benchmark-repeat
+       bench-case
+       backend
+       opts
+       (- repeats 1)
+       (learn-benchmark-run-once bench-case backend opts))))
+
+(define (learn-benchmark-status output expected)
+  (if (equal? expected learn-no-expected-tag)
+      'ok
+      (if (equal? output expected) 'ok 'mismatch)))
+
+(define (run-benchmark-case bench-case backend . opts)
+  (let* ((case-params (benchmark-case-params bench-case))
+         (repeats (learn-option opts
+                                ':repeats
+                                (learn-option case-params ':repeats 1)))
+         (expected (learn-option opts
+                                 ':expected
+                                 (learn-option case-params
+                                               ':expected
+                                               learn-no-expected-tag)))
+         (metric-fn (learn-option opts
+                                  ':metric-fn
+                                  (learn-option case-params
+                                                ':metric-fn
+                                                learn-benchmark-default-metrics)))
+         (started (current-time-ms))
+         (output (learn-benchmark-repeat bench-case
+                                         backend
+                                         opts
+                                         repeats
+                                         #f))
+         (ended (current-time-ms))
+         (elapsed (- ended started))
+         (metrics (metric-fn output elapsed repeats))
+         (status (learn-benchmark-status output expected)))
+    (benchmark-result (benchmark-case-name bench-case)
+                      backend
+                      output
+                      metrics
+                      status
+                      ':expected expected)))
+
+(define (backend-comparison case-name results consistent? . opts)
+  (vector learn-backend-comparison-tag case-name results consistent? opts))
+
+(define (backend-comparison? x)
+  (and (vector? x)
+       (>= (vector-length x) 5)
+       (eq? (vector-ref x 0) learn-backend-comparison-tag)))
+
+(define (backend-comparison-case comparison) (vector-ref comparison 1))
+(define (backend-comparison-results comparison) (vector-ref comparison 2))
+(define (backend-comparison-consistent? comparison) (vector-ref comparison 3))
+(define (backend-comparison-params comparison) (vector-ref comparison 4))
+
+(define (learn-benchmark-result-ok? result)
+  (equal? (benchmark-result-status result) 'ok))
+
+(define (learn-benchmark-results-ok? results)
+  (cond
+    ((null? results) #t)
+    ((learn-benchmark-result-ok? (car results))
+     (learn-benchmark-results-ok? (cdr results)))
+    (else #f)))
+
+(define (learn-benchmark-outputs-match? expected results)
+  (cond
+    ((null? results) #t)
+    ((equal? expected (benchmark-result-output (car results)))
+     (learn-benchmark-outputs-match? expected (cdr results)))
+    (else #f)))
+
+(define (learn-benchmark-results-consistent? results)
+  (if (null? results)
+      #t
+      (and (learn-benchmark-results-ok? results)
+           (learn-benchmark-outputs-match?
+            (benchmark-result-output (car results))
+            (cdr results)))))
+
+(define (learn-run-benchmark-case-list bench-case backends opts)
+  (if (null? backends)
+      '()
+      (cons (apply run-benchmark-case
+                   (cons bench-case (cons (car backends) opts)))
+            (learn-run-benchmark-case-list bench-case
+                                           (cdr backends)
+                                           opts))))
+
+(define (compare-backends bench-case backends . opts)
+  (let ((results (learn-run-benchmark-case-list bench-case backends opts)))
+    (apply backend-comparison
+           (cons (benchmark-case-name bench-case)
+                 (cons results
+                       (cons (learn-benchmark-results-consistent? results)
+                             opts))))))
+
+(define (compare-compiler-backends bench-case backends . opts)
+  (apply compare-backends (cons bench-case (cons backends opts))))
+
+(define (learn-benchmark-result-summaries results)
+  (if (null? results)
+      '()
+      (cons (benchmark-result-summary (car results))
+            (learn-benchmark-result-summaries (cdr results)))))
+
+(define (backend-comparison-summary comparison)
+  (list (learn-pair 'case (backend-comparison-case comparison))
+        (learn-pair 'consistent? (backend-comparison-consistent? comparison))
+        (learn-pair 'results
+                    (learn-benchmark-result-summaries
+                     (backend-comparison-results comparison)))))
+
+(define (learn-run-suite-cases cases backends opts)
+  (if (null? cases)
+      '()
+      (cons (apply compare-backends (cons (car cases) (cons backends opts)))
+            (learn-run-suite-cases (cdr cases) backends opts))))
+
+(define (run-benchmark-suite suite backends . opts)
+  (learn-run-suite-cases (benchmark-suite-cases suite) backends opts))
+
+(define (learn-comparisons-consistent? comparisons)
+  (cond
+    ((null? comparisons) #t)
+    ((backend-comparison-consistent? (car comparisons))
+     (learn-comparisons-consistent? (cdr comparisons)))
+    (else #f)))
+
+(define (benchmark-report suite comparisons)
+  (list (learn-pair 'suite (benchmark-suite-name suite))
+        (learn-pair 'case-count (length (benchmark-suite-cases suite)))
+        (learn-pair 'comparison-count (length comparisons))
+        (learn-pair 'consistent? (learn-comparisons-consistent? comparisons))
+        (learn-pair 'comparisons
+                    (learn-registry-benchmark-summaries comparisons))))
+
+(define (log-benchmark-result ctx result)
+  (append-file
+   (learn-registry-path-join (run-context-dir ctx) "benchmarks.jsonl")
+   (learn-registry-json-object-line
+    (if (backend-comparison? result)
+        (backend-comparison-summary result)
+        (benchmark-result-summary result))))
+  ctx)

@@ -1,0 +1,129 @@
+(require learn)
+
+(define (qgtl-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define (qgtl-approx label actual expected tol)
+  (qgtl-assert label (< (abs (- actual expected)) tol)))
+
+(define (v2-norm v)
+  (sqrt (+ (* (vector-ref v 0) (vector-ref v 0))
+           (* (vector-ref v 1) (vector-ref v 1)))))
+
+(define qgtl-sphere (spherical-space 2))
+(define qgtl-ball (hyperbolic-space 2))
+
+(define qgtl-projected-sphere
+  (riemannian-project qgtl-sphere (vector 3.0 4.0)))
+(qgtl-approx "spherical projection normalizes"
+             (v2-norm qgtl-projected-sphere)
+             1.0
+             0.000001)
+
+(define qgtl-sphere-gradient
+  (riemannian-gradient qgtl-sphere
+                       (vector 1.0 0.0)
+                       (vector 1.0 2.0)))
+(qgtl-approx "spherical gradient tangent x"
+             (vector-ref qgtl-sphere-gradient 0)
+             0.0
+             0.000001)
+(qgtl-approx "spherical gradient tangent y"
+             (vector-ref qgtl-sphere-gradient 1)
+             2.0
+             0.000001)
+
+(define qgtl-projected-ball
+  (riemannian-project qgtl-ball (vector 2.0 0.0)))
+(qgtl-assert "hyperbolic projection stays inside ball"
+             (< (v2-norm qgtl-projected-ball) 1.0))
+
+(define qgtl-rsgd
+  (riemannian-sgd-optimizer (euclidean-space 1)
+                            ':lr 0.2
+                            ':max-iter 40
+                            ':tol 0.000001))
+
+(define (qgtl-quadratic v)
+  (* (- (vector-ref v 0) 2.0)
+     (- (vector-ref v 0) 2.0)))
+
+(define qgtl-minimized
+  (optimizer-minimize qgtl-rsgd qgtl-quadratic (vector 0.0)))
+(qgtl-approx "riemannian optimizer minimizes vector objective"
+             (vector-ref qgtl-minimized 0)
+             2.0
+             0.01)
+
+(define qgtl-train-result
+  (riemannian-train-loop qgtl-sphere
+                         (lambda (v)
+                           (+ (* (- (vector-ref v 0) 0.0)
+                                 (- (vector-ref v 0) 0.0))
+                              (* (- (vector-ref v 1) 1.0)
+                                 (- (vector-ref v 1) 1.0))))
+                         (vector 2.0 0.25)
+                         ':epochs 3
+                         ':lr 0.1))
+(qgtl-assert "riemannian train-loop records epochs"
+             (= (length (history qgtl-train-result)) 3))
+(qgtl-approx "riemannian train-loop starts on manifold"
+             (v2-norm (learn-alist-get (car (history qgtl-train-result))
+                                       'params
+                                       (vector 0.0 0.0)))
+             1.0
+             0.000001)
+
+(define qgtl-born-probs (born-probabilities '(1.0 2.0 0.0)))
+(qgtl-approx "born probability first"
+             (car qgtl-born-probs)
+             0.2
+             0.000001)
+(qgtl-approx "born probability second"
+             (car (cdr qgtl-born-probs))
+             0.8
+             0.000001)
+(qgtl-assert "born deterministic sample index"
+             (= (born-sample-index '(1.0 2.0 0.0) ':seed 1) 1))
+(qgtl-assert "born deterministic sample value"
+             (equal? (born-sample '(1.0 2.0 0.0)
+                                  ':values '(low high none)
+                                  ':seed 1)
+                     'high))
+(qgtl-approx "born expectation"
+             (born-expectation '(1.0 2.0 0.0) '(10.0 20.0 30.0))
+             18.0
+             0.000001)
+
+(define qgtl-backend
+  (simulator-learn-backend
+   'moonlab-dev
+   ':capabilities '(manifold-training born-sampling qgtl-prototype)
+   ':handlers
+   (list (learn-pair
+          'describe
+          (lambda (payload opts)
+            (list (learn-pair 'payload payload)
+                  (learn-pair 'opts opts)))))))
+
+(qgtl-assert "backend descriptor"
+             (learn-backend? qgtl-backend))
+(qgtl-assert "backend capability true"
+             (learn-backend-supports? qgtl-backend 'qgtl-prototype))
+(qgtl-assert "backend capability false"
+             (not (learn-backend-supports? qgtl-backend 'quantum-execution)))
+(qgtl-assert "backend summary names handler"
+             (member 'describe
+                     (learn-alist-get (learn-backend-summary qgtl-backend)
+                                      'handlers
+                                      '())))
+
+(define qgtl-backend-reply
+  (learn-backend-call qgtl-backend 'describe 'probe ':mode 'dry-run))
+(qgtl-assert "backend dispatch payload"
+             (equal? (learn-alist-get qgtl-backend-reply 'payload 'missing)
+                     'probe))
+
+(display "qgtl/selene-facing learn support ... OK") (newline)

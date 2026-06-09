@@ -1,0 +1,241 @@
+;;; learn/geometry.esk
+;;;
+;;; Geometry-aware embedding helpers for Eshkol's geometric-intelligence path.
+;;; This is a small practical layer: spaces, curvature-aware distances,
+;;; mixed-curvature composition, and embedding diagnostics.
+
+(require learn.core)
+
+(provide geometry-space euclidean-space spherical-space hyperbolic-space
+         geometry-space? geometry-space-kind geometry-space-dimension
+         geometry-space-curvature geometry-space-params
+         geometry-distance mixed-geometry-distance geometry-summary
+         mixed-geometry-summary geometry-distance-matrix
+         geometric-regularization)
+
+(define learn-geometry-space-tag 'learn-geometry-space)
+
+(define (geometry-space kind dimension . opts)
+  (let ((curvature
+         (learn-option opts
+                       ':curvature
+                       (cond
+                         ((equal? kind 'euclidean) 0.0)
+                         ((equal? kind 'spherical) 1.0)
+                         ((equal? kind 'hyperbolic) -1.0)
+                         (else 0.0)))))
+    (vector learn-geometry-space-tag kind dimension curvature opts)))
+
+(define (euclidean-space dimension . opts)
+  (apply geometry-space (cons 'euclidean (cons dimension opts))))
+
+(define (spherical-space dimension . opts)
+  (apply geometry-space (cons 'spherical (cons dimension opts))))
+
+(define (hyperbolic-space dimension . opts)
+  (apply geometry-space (cons 'hyperbolic (cons dimension opts))))
+
+(define (geometry-space? x)
+  (and (vector? x)
+       (>= (vector-length x) 5)
+       (eq? (vector-ref x 0) learn-geometry-space-tag)))
+
+(define (geometry-space-kind space) (vector-ref space 1))
+(define (geometry-space-dimension space) (vector-ref space 2))
+(define (geometry-space-curvature space) (vector-ref space 3))
+(define (geometry-space-params space) (vector-ref space 4))
+
+(define (learn-geometry-row row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-geometry-clamp x lo hi)
+  (max lo (min hi x)))
+
+(define (learn-geometry-squared-distance a b)
+  (if (or (null? a) (null? b))
+      0.0
+      (+ (* (- (car a) (car b)) (- (car a) (car b)))
+         (learn-geometry-squared-distance (cdr a) (cdr b)))))
+
+(define (learn-geometry-norm row)
+  (sqrt (learn-dot row row)))
+
+(define (learn-geometry-radius curvature)
+  (if (= curvature 0.0)
+      1.0
+      (/ 1.0 (sqrt (abs curvature)))))
+
+(define (learn-geometry-acosh x)
+  (acosh (max 1.0 x)))
+
+(define (learn-euclidean-distance a b)
+  (sqrt (learn-geometry-squared-distance a b)))
+
+(define (learn-spherical-distance space a b)
+  (let* ((an (learn-geometry-norm a))
+         (bn (learn-geometry-norm b))
+         (curvature (geometry-space-curvature space))
+         (radius (learn-geometry-radius curvature)))
+    (if (or (= an 0.0) (= bn 0.0))
+        0.0
+        (* radius
+           (acos (learn-geometry-clamp (/ (learn-dot a b) (* an bn))
+                                       -1.0
+                                       1.0))))))
+
+(define (learn-hyperbolic-distance space a b)
+  (let* ((curvature (geometry-space-curvature space))
+         (radius (learn-geometry-radius curvature))
+         (a2 (learn-dot a a))
+         (b2 (learn-dot b b))
+         (d2 (learn-geometry-squared-distance a b))
+         (den (* (max 0.000001 (- 1.0 a2))
+                 (max 0.000001 (- 1.0 b2))))
+         (arg (+ 1.0 (/ (* 2.0 d2) den))))
+    (* radius (learn-geometry-acosh arg))))
+
+(define (geometry-distance space a b)
+  (let* ((ra (learn-validate-row-width
+              (learn-geometry-row a)
+              (geometry-space-dimension space)
+              "geometry-distance"))
+         (rb (learn-validate-row-width
+              (learn-geometry-row b)
+              (geometry-space-dimension space)
+              "geometry-distance"))
+         (kind (geometry-space-kind space)))
+    (cond
+      ((equal? kind 'euclidean) (learn-euclidean-distance ra rb))
+      ((equal? kind 'spherical) (learn-spherical-distance space ra rb))
+      ((equal? kind 'hyperbolic) (learn-hyperbolic-distance space ra rb))
+      (else (error "geometry-distance" "unknown geometry kind" kind)))))
+
+(define (learn-row-slice row n)
+  (list (learn-take row n) (learn-drop row n)))
+
+(define (learn-mixed-geometry-distance-sum spaces a b acc)
+  (if (null? spaces)
+      (sqrt acc)
+      (let* ((space (car spaces))
+             (n (geometry-space-dimension space))
+             (as (learn-row-slice a n))
+             (bs (learn-row-slice b n))
+             (d (geometry-distance space (car as) (car bs))))
+        (learn-mixed-geometry-distance-sum
+         (cdr spaces)
+         (car (cdr as))
+         (car (cdr bs))
+         (+ acc (* d d))))))
+
+(define (learn-mixed-geometry-dimension spaces)
+  (if (null? spaces)
+      0
+      (+ (geometry-space-dimension (car spaces))
+         (learn-mixed-geometry-dimension (cdr spaces)))))
+
+(define (mixed-geometry-distance spaces a b)
+  (let* ((ra (learn-geometry-row a))
+         (rb (learn-geometry-row b))
+         (expected (learn-mixed-geometry-dimension spaces)))
+    (learn-validate-row-width ra expected "mixed-geometry-distance")
+    (learn-validate-row-width rb expected "mixed-geometry-distance")
+    (learn-mixed-geometry-distance-sum spaces ra rb 0.0)))
+
+(define (learn-geometry-kind-count rows kind)
+  (learn-count (lambda (space) (equal? (geometry-space-kind space) kind)) rows))
+
+(define (learn-geometry-point-errors space row)
+  (let* ((r (learn-geometry-row row))
+         (kind (geometry-space-kind space))
+         (norm (learn-geometry-norm r)))
+    (cond
+      ((not (= (length r) (geometry-space-dimension space)))
+       (list (list 'dimension-mismatch
+                   (geometry-space-dimension space)
+                   (length r))))
+      ((and (equal? kind 'hyperbolic) (>= norm 1.0))
+       (list (list 'outside-poincare-ball norm)))
+      ((and (equal? kind 'spherical) (= norm 0.0))
+       (list 'zero-spherical-vector))
+      (else '()))))
+
+(define (learn-geometry-errors-loop space rows)
+  (if (null? rows)
+      '()
+      (append (learn-geometry-point-errors space (car rows))
+              (learn-geometry-errors-loop space (cdr rows)))))
+
+(define (learn-geometry-pair-distances space row rows)
+  (if (null? rows)
+      '()
+      (cons (geometry-distance space row (car rows))
+            (learn-geometry-pair-distances space row (cdr rows)))))
+
+(define (learn-geometry-all-distances space rows)
+  (if (or (null? rows) (null? (cdr rows)))
+      '()
+      (append (learn-geometry-pair-distances space (car rows) (cdr rows))
+              (learn-geometry-all-distances space (cdr rows)))))
+
+(define (geometry-summary space rows)
+  (let* ((rs (map learn-geometry-row (learn-seq->list rows)))
+         (distances (learn-geometry-all-distances space rs))
+         (errors (learn-geometry-errors-loop space rs)))
+    (list (learn-pair 'kind (geometry-space-kind space))
+          (learn-pair 'dimension (geometry-space-dimension space))
+          (learn-pair 'curvature (geometry-space-curvature space))
+          (learn-pair 'samples (length rs))
+          (learn-pair 'valid? (null? errors))
+          (learn-pair 'errors errors)
+          (learn-pair 'min-distance (if (null? distances) 0.0 (learn-list-min distances)))
+          (learn-pair 'mean-distance (learn-list-mean distances))
+          (learn-pair 'max-distance (if (null? distances) 0.0 (learn-list-max distances))))))
+
+(define (mixed-geometry-summary spaces rows)
+  (let* ((rs (map learn-geometry-row (learn-seq->list rows)))
+         (dimension (learn-mixed-geometry-dimension spaces)))
+    (list (learn-pair 'spaces (length spaces))
+          (learn-pair 'dimension dimension)
+          (learn-pair 'samples (length rs))
+          (learn-pair 'euclidean-spaces (learn-geometry-kind-count spaces 'euclidean))
+          (learn-pair 'spherical-spaces (learn-geometry-kind-count spaces 'spherical))
+          (learn-pair 'hyperbolic-spaces (learn-geometry-kind-count spaces 'hyperbolic)))))
+
+(define (learn-distance-row space row rows)
+  (if (null? rows)
+      '()
+      (cons (geometry-distance space row (car rows))
+            (learn-distance-row space row (cdr rows)))))
+
+(define (geometry-distance-matrix space rows)
+  (let ((rs (map learn-geometry-row (learn-seq->list rows))))
+    (letrec ((loop (lambda (remaining)
+                     (if (null? remaining)
+                         '()
+                         (cons (learn-distance-row space (car remaining) rs)
+                               (loop (cdr remaining)))))))
+      (loop rs))))
+
+(define (geometric-regularization space rows)
+  (let* ((rs (map learn-geometry-row (learn-seq->list rows)))
+         (errors (learn-geometry-errors-loop space rs)))
+    (if (null? rs)
+        0.0
+        (+ (if (null? errors) 0.0 (length errors))
+           (cond
+             ((equal? (geometry-space-kind space) 'spherical)
+              (learn-list-mean
+               (map (lambda (row)
+                      (let ((n (learn-geometry-norm row)))
+                        (* (- n 1.0) (- n 1.0))))
+                    rs)))
+             ((equal? (geometry-space-kind space) 'hyperbolic)
+              (learn-list-mean
+               (map (lambda (row)
+                      (let ((n (learn-geometry-norm row)))
+                        (if (< n 1.0) 0.0 (* (- n 0.999) (- n 0.999)))))
+                    rs)))
+             (else 0.0))))))

@@ -1,0 +1,178 @@
+(require learn)
+
+(define (registry-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define (registry-approx label actual expected tol)
+  (registry-assert label (< (abs (- actual expected)) tol)))
+
+(define registry-ds
+  (csv-dataset "fixtures/learn_benchmark_tabular.csv"
+               '("x1" "x2" "x3")
+               "label"))
+
+(define registry-tabular-manifest
+  (dataset-manifest-from-dataset
+   'benchmark-tabular
+   registry-ds
+   ':source "fixtures/learn_benchmark_tabular.csv"
+   ':schema (list (shape-schema 'features '(* 3)))
+   ':tags '(tabular deterministic eshkol-learn)))
+
+(registry-assert "tabular manifest"
+                 (dataset-manifest? registry-tabular-manifest))
+(registry-assert "tabular manifest samples"
+                 (= (learn-alist-get
+                     (dataset-manifest-summary registry-tabular-manifest)
+                     'samples
+                     0)
+                    12))
+
+(define registry-ts
+  (time-series-dataset '(0.0 1.0 2.0 3.0)
+                       '(1.0 3.0 5.0 7.0)
+                       ':name 'linear-simulator))
+
+(define registry-ts-manifest
+  (time-series-manifest
+   'linear-simulator-series
+   registry-ts
+   ':schema (list (shape-schema 'time '(*) )
+                  (shape-schema 'value '(*) ))
+   ':tags '(scientific-learning simulator)))
+
+(registry-assert "time-series manifest kind"
+                 (equal? (dataset-manifest-kind registry-ts-manifest)
+                         'time-series))
+(registry-assert "time-series manifest dimension"
+                 (= (learn-alist-get
+                     (dataset-manifest-summary registry-ts-manifest)
+                     'value-dimension
+                     0)
+                    1))
+
+(define registry-state-space
+  (state-space-dataset '(0.0 1.0 2.0)
+                       (list (vector 1.0)
+                             (vector 3.0)
+                             (vector 5.0))
+                       ':name 'linear-state))
+
+(define registry-state-manifest
+  (state-space-manifest
+   'linear-state-space
+   registry-state-space
+   ':tags '(ode state-space moonlab-ready)))
+
+(registry-assert "state-space manifest dimension"
+                 (= (learn-alist-get
+                     (dataset-manifest-summary registry-state-manifest)
+                     'state-dimension
+                     0)
+                    1))
+
+(define registry-run
+  (start-run "registry-benchmark-test"
+             ':root "runs"
+             ':run-id "deterministic"
+             ':seed 123))
+
+(log-dataset-manifest registry-run registry-tabular-manifest)
+(log-dataset-manifest registry-run registry-ts-manifest)
+
+(define registry-lineage
+  (run-lineage "deterministic"
+               '("baseline-tabular")
+               ':dataset 'linear-simulator-series
+               ':backend 'aot
+               ':purpose 'scientific-benchmark
+               ':tags '(eshkol-native qgtl-selene)))
+
+(log-run-lineage registry-run registry-lineage)
+
+(registry-assert "lineage child"
+                 (equal? (run-lineage-child registry-lineage)
+                         "deterministic"))
+(registry-assert "lineage parent count"
+                 (= (length (run-lineage-parents registry-lineage)) 1))
+
+(define registry-aot
+  (compiler-backend 'aot 'aot
+                    ':capabilities '(compiler-comparison scientific-learning)))
+(define registry-jit
+  (compiler-backend 'jit 'jit
+                    ':capabilities '(compiler-comparison scientific-learning)))
+
+(registry-assert "compiler backend mode"
+                 (equal? (compiler-backend-mode registry-aot) 'aot))
+
+(define (slope-metrics output elapsed repeats)
+  (list (learn-pair 'slope output)
+        (learn-pair 'elapsed-ms elapsed)
+        (learn-pair 'repeats repeats)))
+
+(define registry-slope-case
+  (benchmark-case
+   'time-series-linear-slope
+   (lambda (backend opts)
+     (vector-ref (time-series-linear-params registry-ts) 1))
+   ':expected 2.0
+   ':metric-fn slope-metrics
+   ':dataset-manifest registry-ts-manifest
+   ':repeats 2
+   ':tags '(aot-jit-parity scientific-learning)))
+
+(define registry-comparison
+  (compare-compiler-backends registry-slope-case
+                             (list registry-aot registry-jit)))
+
+(registry-assert "backend comparison consistent"
+                 (backend-comparison-consistent? registry-comparison))
+(registry-assert "backend comparison result count"
+                 (= (length (backend-comparison-results registry-comparison)) 2))
+(registry-approx "benchmark output"
+                 (benchmark-result-output
+                  (car (backend-comparison-results registry-comparison)))
+                 2.0
+                 0.000001)
+
+(log-benchmark-result registry-run registry-comparison)
+
+(define registry-suite
+  (benchmark-suite 'scientific-registry-suite
+                   (list registry-slope-case)
+                   ':tags '(tsotchke-thesis qgtl selene moonlab)))
+(define registry-suite-results
+  (run-benchmark-suite registry-suite (list registry-aot registry-jit)))
+(define registry-report
+  (benchmark-report registry-suite registry-suite-results))
+
+(registry-assert "benchmark report consistent"
+                 (learn-alist-get registry-report 'consistent? #f))
+
+(define registry
+  (experiment-registry 'scientific-learning-registry
+                       ':thesis 'tsotchke
+                       ':scope 'scientific-learning))
+(registry-add-dataset! registry registry-tabular-manifest)
+(registry-add-dataset! registry registry-ts-manifest)
+(registry-add-dataset! registry registry-state-manifest)
+(registry-add-run! registry (run-summary registry-run))
+(registry-add-lineage! registry registry-lineage)
+(registry-add-backend! registry registry-aot)
+(registry-add-backend! registry registry-jit)
+(registry-add-benchmark! registry registry-comparison)
+
+(define registry-summary-value (registry-summary registry))
+(registry-assert "registry dataset count"
+                 (= (learn-alist-get registry-summary-value 'dataset-count 0) 3))
+(registry-assert "registry benchmark count"
+                 (= (learn-alist-get registry-summary-value 'benchmark-count 0) 1))
+(registry-assert "registry backend count"
+                 (= (learn-alist-get registry-summary-value 'backend-count 0) 2))
+
+(end-run registry-run)
+
+(display "registry benchmark harness ... OK") (newline)

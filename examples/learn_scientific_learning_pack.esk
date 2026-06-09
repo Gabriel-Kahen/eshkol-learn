@@ -1,0 +1,73 @@
+(require learn)
+
+(define times '(0.0 1.0 2.0 3.0))
+(define values '(1.0 3.0 5.0 7.0))
+(define series (time-series-dataset times values ':name 'line))
+
+(define (line-simulator params t)
+  (+ (vector-ref params 0)
+     (* (vector-ref params 1) t)))
+
+(define (native-physics-objective params)
+  (physics-informed-loss
+   (boundary-condition-loss (vector (vector-ref params 0)) '(2.0))
+   0.0
+   ':physics-weight 0.25))
+
+(define native-params
+  (optimizer-minimize (autodiff-sgd-optimizer
+                       ':lr 0.2
+                       ':max-iter 40
+                       ':tol 0.0000001)
+                      native-physics-objective
+                      (vector 0.0)))
+
+(define fallback-fit
+  (time-series-parameter-fit line-simulator
+                             (vector 0.0 0.0)
+                             series
+                             ':mode 'linear
+                             ':optimizer
+                             (sgd-optimizer ':lr 0.05 ':max-iter 140)))
+
+(define (constant-rhs params state t)
+  (vector (vector-ref params 0)))
+
+(define states
+  (ode-euler-simulate constant-rhs
+                      (vector 2.0)
+                      (vector 1.0)
+                      '(0.0 1.0 2.0)))
+
+(display "time-series summary: ")
+(display (time-series-summary series))
+(newline)
+
+(display "native physics loss: ")
+(display (native-physics-objective native-params))
+(newline)
+
+(display "native params: ")
+(display native-params)
+(newline)
+
+(display "fallback prediction at 4.0: ")
+(display (predict fallback-fit '(4.0)))
+(newline)
+
+(display "state-space summary: ")
+(display (state-space-summary
+          (state-space-dataset '(0.0 1.0 2.0) states)))
+(newline)
+
+(display "dynamics residual loss: ")
+(display (dynamics-residual-loss constant-rhs
+                                 (vector 2.0)
+                                 states
+                                 '(0.0 1.0 2.0)))
+(newline)
+
+(display "model shape: ")
+(display (model-shape-summary
+          (sequential-model (list (dense-layer 1 1 ':activation 'linear)))))
+(newline)

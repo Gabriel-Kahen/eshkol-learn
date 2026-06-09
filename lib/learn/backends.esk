@@ -1,0 +1,80 @@
+;;; learn/backends.esk
+;;;
+;;; Declarative backend descriptors for future simulator and hardware bridges.
+
+(require learn.core)
+
+(provide learn-backend classical-learn-backend simulator-learn-backend
+         quantum-learn-backend learn-backend? learn-backend-kind
+         learn-backend-name learn-backend-capabilities learn-backend-params
+         learn-backend-supports? learn-backend-summary
+         learn-backend-handler learn-backend-call)
+
+(define learn-backend-tag 'learn-backend)
+
+(define (learn-backend kind name capabilities . opts)
+  (vector learn-backend-tag kind name capabilities opts))
+
+(define (classical-learn-backend . opts)
+  (apply learn-backend
+         (cons 'classical
+               (cons (learn-option opts ':name 'classical)
+                     (cons (learn-option opts
+                                         ':capabilities
+                                         '(manifold-training born-sampling))
+                           opts)))))
+
+(define (simulator-learn-backend name . opts)
+  (apply learn-backend
+         (cons 'simulator
+               (cons name
+                     (cons (learn-option opts
+                                         ':capabilities
+                                         '(manifold-training born-sampling))
+                           opts)))))
+
+(define (quantum-learn-backend name . opts)
+  (apply learn-backend
+         (cons 'quantum
+               (cons name
+                     (cons (learn-option opts
+                                         ':capabilities
+                                         '(quantum-execution hybrid-training))
+                           opts)))))
+
+(define (learn-backend? x)
+  (and (vector? x)
+       (>= (vector-length x) 5)
+       (eq? (vector-ref x 0) learn-backend-tag)))
+
+(define (learn-backend-kind backend) (vector-ref backend 1))
+(define (learn-backend-name backend) (vector-ref backend 2))
+(define (learn-backend-capabilities backend) (vector-ref backend 3))
+(define (learn-backend-params backend) (vector-ref backend 4))
+
+(define (learn-backend-supports? backend capability)
+  (if (member capability (learn-backend-capabilities backend)) #t #f))
+
+(define (learn-backend-summary backend)
+  (list (learn-pair 'kind (learn-backend-kind backend))
+        (learn-pair 'name (learn-backend-name backend))
+        (learn-pair 'capabilities (learn-backend-capabilities backend))
+        (learn-pair 'handlers
+                    (map learn-pair-key
+                         (learn-option (learn-backend-params backend)
+                                       ':handlers
+                                       '())))))
+
+(define (learn-backend-handler backend operation)
+  (learn-alist-get
+   (learn-option (learn-backend-params backend) ':handlers '())
+   operation
+   #f))
+
+(define (learn-backend-call backend operation payload . opts)
+  (let ((handler (learn-backend-handler backend operation)))
+    (if handler
+        (handler payload opts)
+        (error "learn-backend-call"
+               "backend does not implement operation"
+               operation))))

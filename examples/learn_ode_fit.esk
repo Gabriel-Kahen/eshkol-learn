@@ -1,0 +1,16 @@
+(require learn)
+
+(define times '(0.0 1.0 2.0))
+(define observed '(1.0 2.0 4.0))
+
+(define (exp-simulator params t)
+  (* (vector-ref params 0) (exp (* (vector-ref params 1) t))))
+
+(define (main)
+  (define fitted
+    (ode-parameter-fit exp-simulator (vector 1.0 0.1) times observed
+                       ':optimizer (sgd-optimizer ':lr 0.01 ':max-iter 120)))
+
+  (display (predict fitted times)) (newline))
+
+(main)

@@ -1,0 +1,85 @@
+;;; learn/sampling.esk
+;;;
+;;; Born-rule-inspired sampling helpers for learn workflows.
+
+(require learn.core)
+
+(provide born-probabilities born-sample-index born-sample
+         born-expectation born-sampling-summary)
+
+(define (learn-born-square x)
+  (* x x))
+
+(define (learn-born-weights amplitudes)
+  (map (lambda (a) (learn-born-square (abs a)))
+       (learn-seq->list amplitudes)))
+
+(define (learn-born-uniform n)
+  (if (<= n 0)
+      '()
+      (let ((p (/ 1.0 n)))
+        (map (lambda (ignored) p) (learn-range n)))))
+
+(define (learn-born-normalize weights)
+  (let ((total (learn-list-sum weights)))
+    (if (= total 0.0)
+        (learn-born-uniform (length weights))
+        (map (lambda (w) (/ w total)) weights))))
+
+(define (born-probabilities amplitudes . opts)
+  (learn-born-normalize (learn-born-weights amplitudes)))
+
+(define (learn-born-next-seed seed)
+  (modulo (+ (* 1103515245 seed) 12345) 2147483647))
+
+(define (learn-born-normalize-seed seed)
+  (if seed seed 1234567))
+
+(define (learn-born-unit seed)
+  (/ (learn-born-next-seed (learn-born-normalize-seed seed)) 2147483647.0))
+
+(define (learn-born-sample-index-loop probs u cumulative idx)
+  (cond
+    ((null? probs) (max 0 (- idx 1)))
+    ((<= u (+ cumulative (car probs))) idx)
+    (else
+     (learn-born-sample-index-loop (cdr probs)
+                                   u
+                                   (+ cumulative (car probs))
+                                   (+ idx 1)))))
+
+(define (born-sample-index amplitudes . opts)
+  (let* ((seed (learn-option opts ':seed #f))
+         (u (learn-born-unit seed))
+         (probs (born-probabilities amplitudes)))
+    (learn-born-sample-index-loop probs u 0.0 0)))
+
+(define (born-sample amplitudes . opts)
+  (let* ((values (learn-option opts ':values #f))
+         (idx (apply born-sample-index (cons amplitudes opts))))
+    (if values
+        (learn-nth (learn-seq->list values) idx)
+        idx)))
+
+(define (learn-born-expectation-loop probs values)
+  (if (or (null? probs) (null? values))
+      0.0
+      (+ (* (car probs) (car values))
+         (learn-born-expectation-loop (cdr probs) (cdr values)))))
+
+(define (born-expectation amplitudes values)
+  (learn-born-expectation-loop
+   (born-probabilities amplitudes)
+   (learn-seq->list values)))
+
+(define (born-sampling-summary amplitudes . opts)
+  (let* ((amps (learn-seq->list amplitudes))
+         (weights (learn-born-weights amps))
+         (probs (born-probabilities amps)))
+    (list (learn-pair 'samples (length amps))
+          (learn-pair 'weights weights)
+          (learn-pair 'probabilities probs)
+          (learn-pair 'probability-sum (learn-list-sum probs))
+          (learn-pair 'top-index (learn-argmax probs))
+          (learn-pair 'sample-index
+                      (apply born-sample-index (cons amps opts)))))))

@@ -1,0 +1,36 @@
+(require learn)
+
+(define model
+  (sequential-model (list (dense-layer 1 1 ':activation 'linear))))
+
+(define xs '((1.0) (2.0) (3.0) (4.0)))
+(define ys '(2.0 4.0 6.0 8.0))
+
+(define (objective params)
+  (model-mse-loss model params xs ys))
+
+(define initial-params (model-zero-params model))
+(define optimizer
+  (autodiff-sgd-optimizer ':lr 0.04 ':max-iter 180 ':tol 0.0000001))
+(define trained-params
+  (optimizer-minimize optimizer objective initial-params))
+
+(display "model param count: ")
+(display (model-param-count model))
+(newline)
+
+(display "initial loss: ")
+(display (objective initial-params))
+(newline)
+
+(display "final loss: ")
+(display (objective trained-params))
+(newline)
+
+(display "trained params: ")
+(display trained-params)
+(newline)
+
+(display "prediction for 5.0: ")
+(display (model-forward model trained-params '(5.0)))
+(newline)

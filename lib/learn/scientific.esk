@@ -1,0 +1,48 @@
+;;; learn/scientific.esk
+;;;
+;;; Scientific fitting helpers built on vector objectives.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.optimizers)
+(require learn.metrics)
+
+(provide curve-fit ode-parameter-fit differentiable-simulator-fit)
+
+(define (learn-fit-objective model-fn xs ys)
+  (lambda (params)
+    (mse ys (map (lambda (x) (model-fn params x)) (learn-seq->list xs)))))
+
+(define (learn-scientific-predict estimator x opts)
+  (let ((model-fn (learn-alist-get (learn-estimator-state estimator) 'model-fn #f))
+        (params (learn-alist-get (learn-estimator-state estimator) 'params #f)))
+    (if model-fn
+        (map (lambda (row) (model-fn params row)) (learn-seq->list x))
+        (error "scientific estimator is missing model-fn"))))
+
+(define (learn-scientific-score estimator x y opts)
+  (r2-score y (learn-scientific-predict estimator x opts)))
+
+(define (curve-fit model-fn initial-params x y . opts)
+  (let* ((optimizer (learn-option opts ':optimizer (sgd-optimizer)))
+         (objective (learn-fit-objective model-fn x y))
+         (best (optimizer-minimize optimizer objective initial-params)))
+    (let ((est (learn-make-estimator
+                'curve-fit
+                (list (learn-pair 'predict learn-scientific-predict)
+                      (learn-pair 'score learn-scientific-score))
+                (list (learn-pair ':optimizer optimizer))
+                (list (learn-pair 'model-fn model-fn)
+                      (learn-pair 'params best)))))
+      (learn-set-estimator-fitted! est #t)
+      est)))
+
+(define (ode-parameter-fit simulator-fn initial-params x y . opts)
+  (apply curve-fit (cons simulator-fn
+                         (cons initial-params
+                               (cons x (cons y opts))))))
+
+(define (differentiable-simulator-fit simulator-fn initial-params x y . opts)
+  (apply curve-fit (cons simulator-fn
+                         (cons initial-params
+                               (cons x (cons y opts))))))

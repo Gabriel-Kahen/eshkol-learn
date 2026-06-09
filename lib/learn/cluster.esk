@@ -1,0 +1,221 @@
+;;; learn/cluster.esk
+;;;
+;;; Clustering and nearest-neighbor estimators.
+
+(require learn.core)
+(require learn.protocols)
+(require learn.metrics)
+
+(provide kmeans nearest-neighbors)
+
+(define (learn-cluster-row row)
+  (cond
+    ((pair? row) row)
+    ((vector? row) (learn-seq->list row))
+    (else (list row))))
+
+(define (learn-distance2 a b)
+  (let ((ra (learn-cluster-row a))
+        (rb (learn-cluster-row b)))
+    (if (= (length ra) (length rb))
+        (learn-list-sum
+         (learn-map2 (lambda (x y) (* (- x y) (- x y))) ra rb))
+        (error "learn-distance2" "row width mismatch" (length ra) (length rb)))))
+
+(define (learn-cluster-column rows idx)
+  (if (null? rows)
+      '()
+      (cons (list-ref (car rows) idx)
+            (learn-cluster-column (cdr rows) idx))))
+
+(define (learn-nearest-center row centers best-i best-d i)
+  (if (null? centers)
+      best-i
+      (let ((d (learn-distance2 row (car centers))))
+        (if (< d best-d)
+            (learn-nearest-center row (cdr centers) i d (+ i 1))
+            (learn-nearest-center row (cdr centers) best-i best-d (+ i 1))))))
+
+(define (learn-kmeans-assign row centers)
+  (learn-nearest-center row centers 0 999999999.0 0))
+
+(define (learn-kmeans-assignments rows centers)
+  (if (null? rows)
+      '()
+      (cons (learn-kmeans-assign (car rows) centers)
+            (learn-kmeans-assignments (cdr rows) centers))))
+
+(define (learn-rows-for-cluster rows assignments cluster)
+  (cond
+    ((or (null? rows) (null? assignments)) '())
+    ((= (car assignments) cluster)
+     (cons (learn-cluster-row (car rows))
+           (learn-rows-for-cluster (cdr rows) (cdr assignments) cluster)))
+    (else
+     (learn-rows-for-cluster (cdr rows) (cdr assignments) cluster))))
+
+(define (learn-mean-row rows)
+  (if (null? rows)
+      '()
+      (let ((ncols (length (car rows))))
+        (letrec ((col-loop (lambda (idx)
+                             (if (>= idx ncols)
+                                 '()
+                                 (cons (learn-list-mean (learn-cluster-column rows idx))
+                                       (col-loop (+ idx 1)))))))
+          (col-loop 0)))))
+
+(define (learn-kmeans-new-centers rows assignments k old-centers)
+  (letrec ((loop (lambda (cluster)
+                   (if (>= cluster k)
+                       '()
+                       (let ((members (learn-rows-for-cluster rows assignments cluster)))
+                         (cons (if (null? members)
+                                   (list-ref old-centers cluster)
+                                   (learn-mean-row members))
+                               (loop (+ cluster 1))))))))
+    (loop 0)))
+
+(define (learn-kmeans-fit-loop rows centers k epoch epochs)
+  (if (>= epoch epochs)
+      centers
+      (let* ((assignments (learn-kmeans-assignments rows centers))
+             (new-centers (learn-kmeans-new-centers rows assignments k centers)))
+        (learn-kmeans-fit-loop rows new-centers k (+ epoch 1) epochs))))
+
+(define (learn-kmeans-fit estimator x y opts)
+  (let* ((rows (map learn-cluster-row (learn-seq->list x)))
+         (k (learn-alist-get (learn-estimator-params estimator) ':k 2))
+         (epochs (learn-alist-get (learn-estimator-params estimator) ':epochs 20))
+         (n-features (learn-validate-rectangular-rows rows "kmeans fit"))
+         (initial (learn-take rows k))
+         (centers (learn-kmeans-fit-loop rows initial k 0 epochs)))
+    (learn-fitted-estimator-like
+     estimator
+     (list (learn-pair 'centers centers)
+           (learn-pair 'n-features n-features)))))
+
+(define (learn-kmeans-predict estimator x opts)
+  (if (not (learn-estimator-fitted? estimator))
+      (error "kmeans predict" "estimator is not fitted"))
+  (let ((centers (learn-alist-get (learn-estimator-state estimator) 'centers '()))
+        (n-features (learn-alist-get (learn-estimator-state estimator) 'n-features #f)))
+    (map (lambda (row) (learn-kmeans-assign row centers))
+         (map (lambda (row)
+                (learn-validate-row-width (learn-cluster-row row)
+                                          n-features
+                                          "kmeans predict"))
+              (learn-seq->list x)))))
+
+(define (learn-kmeans-score estimator x y opts)
+  (let* ((centers (learn-alist-get (learn-estimator-state estimator) 'centers '()))
+         (rows (learn-seq->list x))
+         (assignments (learn-kmeans-predict estimator x opts)))
+    (- (learn-list-sum
+        (learn-map2
+         (lambda (row cluster)
+           (learn-distance2 row (list-ref centers cluster)))
+         rows assignments)))))
+
+(define (kmeans . opts)
+  (learn-make-estimator
+   'kmeans
+   (list (learn-pair 'fit learn-kmeans-fit)
+         (learn-pair 'predict learn-kmeans-predict)
+         (learn-pair 'score learn-kmeans-score))
+   (list (learn-pair ':k (learn-option opts ':k 2))
+         (learn-pair ':epochs (learn-option opts ':epochs 20)))
+   '()))
+
+(define (learn-nn-fit estimator x y opts)
+  (let* ((rows (map learn-cluster-row (learn-seq->list x)))
+         (ys (learn-seq->list y))
+         (n-features (learn-validate-rectangular-rows rows "nearest-neighbors fit")))
+    (if (not (= (length rows) (length ys)))
+        (error "nearest-neighbors fit" "x/y length mismatch" (length rows) (length ys)))
+    (learn-fitted-estimator-like
+     estimator
+     (list (learn-pair 'x rows)
+           (learn-pair 'y ys)
+           (learn-pair 'n-features n-features)))))
+
+(define (learn-best-label counts best-label best-count)
+  (if (null? counts)
+      best-label
+      (let ((label (learn-pair-key (car counts)))
+            (count (learn-pair-value (car counts))))
+        (if (> count best-count)
+            (learn-best-label (cdr counts) label count)
+            (learn-best-label (cdr counts) best-label best-count)))))
+
+(define (learn-count-label counts label)
+  (learn-alist-set counts label (+ 1 (learn-alist-get counts label 0))))
+
+(define (learn-nn-majority labels)
+  (letrec ((loop (lambda (rest counts)
+                   (if (null? rest)
+                       (learn-best-label counts #f -1)
+                       (loop (cdr rest) (learn-count-label counts (car rest)))))))
+    (loop labels '())))
+
+(define (learn-nn-distance-labels row train-x train-y)
+  (if (or (null? train-x) (null? train-y))
+      '()
+      (cons (list (learn-distance2 row (car train-x)) (car train-y))
+            (learn-nn-distance-labels row (cdr train-x) (cdr train-y)))))
+
+(define (learn-distance-entry-d entry) (car entry))
+(define (learn-distance-entry-label entry) (car (cdr entry)))
+
+(define (learn-insert-distance entry sorted)
+  (cond
+    ((null? sorted) (list entry))
+    ((< (learn-distance-entry-d entry) (learn-distance-entry-d (car sorted)))
+     (cons entry sorted))
+    (else (cons (car sorted) (learn-insert-distance entry (cdr sorted))))))
+
+(define (learn-sort-distances entries)
+  (if (null? entries)
+      '()
+      (learn-insert-distance (car entries)
+                             (learn-sort-distances (cdr entries)))))
+
+(define (learn-top-k-labels sorted k)
+  (cond
+    ((or (<= k 0) (null? sorted)) '())
+    (else (cons (learn-distance-entry-label (car sorted))
+                (learn-top-k-labels (cdr sorted) (- k 1))))))
+
+(define (learn-nn-predict-one estimator row)
+  (let* ((state (learn-estimator-state estimator))
+         (train-x (learn-alist-get state 'x '()))
+         (train-y (learn-alist-get state 'y '()))
+         (n-features (learn-alist-get state 'n-features #f))
+         (k (learn-alist-get (learn-estimator-params estimator) ':k 1))
+         (checked-row (learn-validate-row-width (learn-cluster-row row)
+                                                n-features
+                                                "nearest-neighbors predict")))
+    (if (< k 1)
+        (error "nearest-neighbors" ":k must be >= 1"))
+    (learn-nn-majority
+     (learn-top-k-labels
+      (learn-sort-distances (learn-nn-distance-labels checked-row train-x train-y))
+      k))))
+
+(define (learn-nn-predict estimator x opts)
+  (if (not (learn-estimator-fitted? estimator))
+      (error "nearest-neighbors predict" "estimator is not fitted"))
+  (map (lambda (row) (learn-nn-predict-one estimator row))
+       (learn-seq->list x)))
+
+(define (learn-nn-score estimator x y opts)
+  (accuracy y (learn-nn-predict estimator x opts)))
+
+(define (nearest-neighbors . opts)
+  (learn-make-estimator
+   'nearest-neighbors
+   (list (learn-pair 'fit learn-nn-fit)
+         (learn-pair 'predict learn-nn-predict)
+         (learn-pair 'score learn-nn-score))
+   (list (learn-pair ':k (learn-option opts ':k 1)))
+   '()))

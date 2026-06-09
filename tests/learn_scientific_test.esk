@@ -1,0 +1,41 @@
+(require learn)
+
+(define (learn-test-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define (learn-test-approx label actual expected tol)
+  (learn-test-assert label (< (abs (- actual expected)) tol)))
+
+(define xs '(0.0 1.0 2.0 3.0))
+(define ys '(1.0 3.0 5.0 7.0))
+
+(define (line params x)
+  (+ (vector-ref params 0) (* (vector-ref params 1) x)))
+
+(define curve-fitted
+  (curve-fit line (vector 0.0 0.0) xs ys
+             ':optimizer (sgd-optimizer ':lr 0.05 ':max-iter 120)))
+
+(learn-test-approx "curve-fit predicts held-out line point"
+                   (car (predict curve-fitted '(4.0)))
+                   9.0
+                   0.25)
+(display "curve-fit learns from finite-difference optimizer ... OK") (newline)
+
+(define times '(0.0 1.0 2.0))
+(define observed '(1.0 2.0 4.0))
+
+(define (exp-simulator params t)
+  (* (vector-ref params 0) (exp (* (vector-ref params 1) t))))
+
+(define ode-fitted
+  (ode-parameter-fit exp-simulator (vector 1.0 0.1) times observed
+                     ':optimizer (sgd-optimizer ':lr 0.01 ':max-iter 120)))
+
+(learn-test-approx "ode fit predicts final observation"
+                   (car (cdr (cdr (predict ode-fitted times))))
+                   4.0
+                   0.25)
+(display "ode-parameter-fit learns from finite-difference optimizer ... OK") (newline)

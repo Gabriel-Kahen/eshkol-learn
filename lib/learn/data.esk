@@ -1,0 +1,309 @@
+;;; learn/data.esk
+;;;
+;;; Dataset wrappers, deterministic splits, batching, and CSV adapters.
+
+(require learn.core)
+(require core.data.csv)
+(require core.data.dataframe)
+
+(provide train-valid-test-split shuffle-split k-fold-split batch-dataset
+         tensor-dataset csv-dataset dataset? dataset-x dataset-y
+         dataset-size dataset-batches dataset-shape dataset-summary
+         dataset-diagnostics validate-dataset validate-feature-width
+         dataframe->xy)
+
+(define learn-dataset-tag 'learn-dataset)
+
+(define (tensor-dataset x y)
+  (vector learn-dataset-tag x y))
+
+(define (dataset? ds)
+  (and (vector? ds)
+       (>= (vector-length ds) 3)
+       (eq? (vector-ref ds 0) learn-dataset-tag)))
+
+(define (dataset-x ds) (vector-ref ds 1))
+(define (dataset-y ds) (vector-ref ds 2))
+
+(define (dataset-size ds)
+  (length (learn-seq->list (dataset-x ds))))
+
+(define (learn-dataset-feature-width rows)
+  (if (null? rows)
+      0
+      (learn-row-length (car rows))))
+
+(define (learn-row-widths rows)
+  (if (null? rows)
+      '()
+      (cons (learn-row-length (car rows))
+            (learn-row-widths (cdr rows)))))
+
+(define (learn-widths-all-equal? widths expected)
+  (cond
+    ((null? widths) #t)
+    ((= (car widths) expected)
+     (learn-widths-all-equal? (cdr widths) expected))
+    (else #f)))
+
+(define (learn-widths-rectangular? widths)
+  (if (null? widths)
+      #t
+      (learn-widths-all-equal? widths (car widths))))
+
+(define (learn-widths-min widths)
+  (if (null? widths)
+      0
+      (learn-list-min widths)))
+
+(define (learn-widths-max widths)
+  (if (null? widths)
+      0
+      (learn-list-max widths)))
+
+(define (dataset-shape ds)
+  (let* ((xs (learn-seq->list (dataset-x ds)))
+         (ys (learn-seq->list (dataset-y ds)))
+         (widths (learn-row-widths xs))
+         (width (learn-dataset-feature-width xs)))
+    (list (learn-pair 'samples (length xs))
+          (learn-pair 'features width)
+          (learn-pair 'targets (length ys))
+          (learn-pair 'x-shape (list (length xs) width))
+          (learn-pair 'y-shape (list (length ys)))
+          (learn-pair 'feature-widths widths)
+          (learn-pair 'rectangular? (learn-widths-rectangular? widths)))))
+
+(define (learn-class-counts classes ys)
+  (if (null? classes)
+      '()
+      (cons (learn-pair (car classes)
+                        (learn-count (lambda (y) (equal? y (car classes))) ys))
+            (learn-class-counts (cdr classes) ys))))
+
+(define (dataset-summary ds)
+  (let* ((xs (learn-seq->list (dataset-x ds)))
+         (ys (learn-seq->list (dataset-y ds)))
+         (width (learn-dataset-feature-width xs))
+         (widths (learn-row-widths xs))
+         (classes (learn-unique ys)))
+    (list (learn-pair 'samples (length xs))
+          (learn-pair 'features width)
+          (learn-pair 'targets (length ys))
+          (learn-pair 'x-shape (list (length xs) width))
+          (learn-pair 'y-shape (list (length ys)))
+          (learn-pair 'feature-widths widths)
+          (learn-pair 'rectangular? (learn-widths-rectangular? widths))
+          (learn-pair 'classes classes)
+          (learn-pair 'class-counts (learn-class-counts classes ys)))))
+
+(define (learn-cons-if condition value rest)
+  (if condition (cons value rest) rest))
+
+(define (learn-diagnostic-errors samples targets widths expected-features)
+  (learn-cons-if
+   (= samples 0)
+   'empty-features
+   (learn-cons-if
+    (not (= samples targets))
+    (list 'x-y-length-mismatch samples targets)
+    (learn-cons-if
+     (not (learn-widths-rectangular? widths))
+     (list 'non-rectangular-feature-rows widths)
+     (learn-cons-if
+      (and expected-features
+           (not (learn-widths-all-equal? widths expected-features)))
+      (list 'feature-width-mismatch
+            expected-features
+            (learn-widths-min widths)
+            (learn-widths-max widths))
+      '())))))
+
+(define (dataset-diagnostics ds . opts)
+  (let* ((xs (learn-seq->list (dataset-x ds)))
+         (ys (learn-seq->list (dataset-y ds)))
+         (widths (learn-row-widths xs))
+         (width (learn-dataset-feature-width xs))
+         (expected-features (learn-option opts ':features #f))
+         (errors (learn-diagnostic-errors
+                  (length xs)
+                  (length ys)
+                  widths
+                  expected-features)))
+    (list (learn-pair 'samples (length xs))
+          (learn-pair 'features width)
+          (learn-pair 'targets (length ys))
+          (learn-pair 'x-shape (list (length xs) width))
+          (learn-pair 'y-shape (list (length ys)))
+          (learn-pair 'feature-widths widths)
+          (learn-pair 'rectangular? (learn-widths-rectangular? widths))
+          (learn-pair 'expected-features expected-features)
+          (learn-pair 'errors errors)
+          (learn-pair 'valid? (null? errors)))))
+
+(define (validate-feature-width x expected . rest)
+  (let* ((context (if (null? rest) "validate-feature-width" (car rest)))
+         (rows (learn-seq->list x))
+         (widths (learn-row-widths rows)))
+    (if (not (learn-widths-all-equal? widths expected))
+        (error context "feature width mismatch" expected widths))
+    rows))
+
+(define (validate-dataset ds . opts)
+  (let* ((diagnostics (apply dataset-diagnostics (cons ds opts)))
+         (errors (learn-alist-get diagnostics 'errors '())))
+    (if (not (null? errors))
+        (error "validate-dataset" "invalid dataset shape" errors))
+    diagnostics))
+
+(define (learn-index-select xs indices)
+  (let ((lst (learn-seq->list xs)))
+    (if (null? indices)
+        '()
+        (cons (list-ref lst (car indices))
+              (learn-index-select lst (cdr indices))))))
+
+(define (learn-shuffled-indices n seed)
+  (learn-shuffle-list (learn-range n) seed))
+
+(define (learn-split-count n ratio)
+  (inexact->exact (floor (* n ratio))))
+
+(define (shuffle-split x y . opts)
+  (let* ((test-ratio (learn-option opts ':test-ratio 0.2))
+         (seed (learn-option opts ':seed #f))
+         (xs (learn-seq->list x))
+         (n (length xs))
+         (indices (learn-shuffled-indices n seed))
+         (n-test (learn-split-count n test-ratio))
+         (test-idx (learn-take indices n-test))
+         (train-idx (learn-drop indices n-test)))
+    (list (learn-index-select x train-idx)
+          (learn-index-select y train-idx)
+          (learn-index-select x test-idx)
+          (learn-index-select y test-idx))))
+
+(define (train-valid-test-split x y . opts)
+  (let* ((valid-ratio (learn-option opts ':valid-ratio 0.2))
+         (test-ratio (learn-option opts ':test-ratio 0.2))
+         (seed (learn-option opts ':seed #f))
+         (xs (learn-seq->list x))
+         (n (length xs))
+         (indices (learn-shuffled-indices n seed))
+         (n-test (learn-split-count n test-ratio))
+         (n-valid (learn-split-count n valid-ratio))
+         (test-idx (learn-take indices n-test))
+         (rest-idx (learn-drop indices n-test))
+         (valid-idx (learn-take rest-idx n-valid))
+         (train-idx (learn-drop rest-idx n-valid)))
+    (list (learn-index-select x train-idx)
+          (learn-index-select y train-idx)
+          (learn-index-select x valid-idx)
+          (learn-index-select y valid-idx)
+          (learn-index-select x test-idx)
+          (learn-index-select y test-idx))))
+
+(define (learn-fold-indices indices fold-size k fold)
+  (let ((start (* fold fold-size)))
+    (if (= fold (- k 1))
+        (learn-drop indices start)
+        (learn-take (learn-drop indices start) fold-size))))
+
+(define (learn-remove-indices all holdout)
+  (cond
+    ((null? all) '())
+    ((member (car all) holdout) (learn-remove-indices (cdr all) holdout))
+    (else (cons (car all) (learn-remove-indices (cdr all) holdout)))))
+
+(define (k-fold-split x y . opts)
+  (let* ((k (learn-option opts ':k 5))
+         (seed (learn-option opts ':seed #f))
+         (n (length (learn-seq->list x)))
+         (indices (learn-shuffled-indices n seed))
+         (fold-size (if (= k 0) n (quotient n k))))
+    (letrec ((loop (lambda (fold acc)
+                     (if (>= fold k)
+                         (reverse acc)
+                         (let* ((valid-idx (learn-fold-indices indices fold-size k fold))
+                                (train-idx (learn-remove-indices indices valid-idx)))
+                           (loop (+ fold 1)
+                                 (cons (list (learn-index-select x train-idx)
+                                             (learn-index-select y train-idx)
+                                             (learn-index-select x valid-idx)
+                                             (learn-index-select y valid-idx))
+                                       acc)))))))
+      (loop 0 '()))))
+
+(define (learn-batch-list xs batch-size)
+  (if (null? xs)
+      '()
+      (cons (learn-take xs batch-size)
+            (learn-batch-list (learn-drop xs batch-size) batch-size))))
+
+(define (batch-dataset x y batch-size)
+  (let ((xb (learn-batch-list (learn-seq->list x) batch-size))
+        (yb (learn-batch-list (learn-seq->list y) batch-size)))
+    (learn-map2 (lambda (bx by) (tensor-dataset bx by)) xb yb)))
+
+(define (dataset-batches ds batch-size)
+  (batch-dataset (dataset-x ds) (dataset-y ds) batch-size))
+
+(define (learn-row-select row indices)
+  (if (null? indices)
+      '()
+      (cons (list-ref row (car indices))
+            (learn-row-select row (cdr indices)))))
+
+(define (learn-rows-select rows indices)
+  (if (null? rows)
+      '()
+      (cons (learn-row-select (car rows) indices)
+            (learn-rows-select (cdr rows) indices))))
+
+(define (learn-column-indices df names)
+  (if (null? names)
+      '()
+      (cons (csv-column-idx df (car names))
+            (learn-column-indices df (cdr names)))))
+
+(define (dataframe->xy df feature-cols target-col)
+  (let* ((feature-idx (learn-column-indices df feature-cols))
+         (rows (csv-rows df))
+         (x (learn-rows-select rows feature-idx))
+         (y (csv-column df target-col)))
+    (list x y)))
+
+(define (learn-try-parse-number str)
+  (if (or (null? str) (not (string? str)) (string=? str ""))
+      #f
+      (let ((n (string->number str)))
+        (if (eq? n #f) #f n))))
+
+(define (learn-csv-infer-field val)
+  (if (null? val)
+      val
+      (let ((n (learn-try-parse-number val)))
+        (if (eq? n #f) val n))))
+
+(define (learn-csv-infer-row row)
+  (if (null? row)
+      '()
+      (cons (learn-csv-infer-field (car row))
+            (learn-csv-infer-row (cdr row)))))
+
+(define (learn-csv-infer-rows rows)
+  (if (null? rows)
+      '()
+      (cons (learn-csv-infer-row (car rows))
+            (learn-csv-infer-rows (cdr rows)))))
+
+(define (learn-csv-parse-typed str)
+  (let ((rows (reverse (csv-parse str))))
+    (if (null? rows)
+        (cons '() '())
+        (cons (car rows) (learn-csv-infer-rows (cdr rows))))))
+
+(define (csv-dataset filename feature-cols target-col)
+  (let* ((df (learn-csv-parse-typed (read-file filename)))
+         (xy (dataframe->xy df feature-cols target-col)))
+    (tensor-dataset (car xy) (car (cdr xy)))))

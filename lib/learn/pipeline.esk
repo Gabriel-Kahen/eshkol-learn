@@ -1,0 +1,83 @@
+;;; learn/pipeline.esk
+;;;
+;;; Sequential estimator pipelines.
+
+(require learn.core)
+(require learn.protocols)
+
+(provide make-pipeline pipeline-step pipeline-steps)
+
+(define (pipeline-step name estimator)
+  (list name estimator))
+
+(define (learn-step-name step)
+  (if (learn-estimator? step) (learn-estimator-kind step) (car step)))
+
+(define (learn-step-estimator step)
+  (if (learn-estimator? step) step (car (cdr step))))
+
+(define (pipeline-steps pipeline)
+  (learn-alist-get (learn-estimator-state pipeline) 'steps '()))
+
+(define (learn-last xs)
+  (if (null? (cdr xs)) (car xs) (learn-last (cdr xs))))
+
+(define (learn-but-last xs)
+  (if (or (null? xs) (null? (cdr xs)))
+      '()
+      (cons (car xs) (learn-but-last (cdr xs)))))
+
+(define (learn-pipeline-fit-transform steps x y)
+  (if (null? steps)
+      x
+      (let ((est (learn-step-estimator (car steps))))
+        (fit est x y)
+        (learn-pipeline-fit-transform (cdr steps) (transform est x) y))))
+
+(define (learn-pipeline-transform-only steps x)
+  (if (null? steps)
+      x
+      (let ((est (learn-step-estimator (car steps))))
+        (learn-pipeline-transform-only (cdr steps) (transform est x)))))
+
+(define (learn-pipeline-fit estimator x y opts)
+  (let* ((steps (pipeline-steps estimator))
+         (pre (learn-but-last steps))
+         (last-step (learn-last steps))
+         (last-est (learn-step-estimator last-step))
+         (x2 (learn-pipeline-fit-transform pre x y)))
+    (fit last-est x2 y)
+    (learn-set-estimator-fitted! estimator #t)
+    estimator))
+
+(define (learn-pipeline-predict estimator x opts)
+  (let* ((steps (pipeline-steps estimator))
+         (pre (learn-but-last steps))
+         (last-est (learn-step-estimator (learn-last steps)))
+         (x2 (learn-pipeline-transform-only pre x)))
+    (predict last-est x2)))
+
+(define (learn-pipeline-transform estimator x opts)
+  (learn-pipeline-transform-only (pipeline-steps estimator) x))
+
+(define (learn-pipeline-score estimator x y opts)
+  (let* ((steps (pipeline-steps estimator))
+         (pre (learn-but-last steps))
+         (last-est (learn-step-estimator (learn-last steps)))
+         (x2 (learn-pipeline-transform-only pre x)))
+    (score last-est x2 y)))
+
+(define (make-pipeline . steps)
+  (let ((actual-steps (if (and (= (length steps) 1)
+                               (list? (car steps))
+                               (not (learn-estimator? (car steps))))
+                          (car steps)
+                          steps)))
+    (learn-make-estimator
+     'pipeline
+     (list (learn-pair 'fit learn-pipeline-fit)
+           (learn-pair 'predict learn-pipeline-predict)
+           (learn-pair 'transform learn-pipeline-transform)
+           (learn-pair 'score learn-pipeline-score))
+     (list (learn-pair ':steps (map learn-step-name actual-steps)))
+     (list (learn-pair 'steps actual-steps)))))

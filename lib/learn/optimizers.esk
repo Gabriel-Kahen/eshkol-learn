@@ -1,0 +1,295 @@
+;;; learn/optimizers.esk
+;;;
+;;; Small optimizer configuration wrappers and pure-Eshkol finite-difference
+;;; minimizers for learn-facing vector objectives.
+
+(require learn.core)
+(require learn.manifold)
+
+(provide sgd-optimizer adam-optimizer lbfgs-optimizer
+         conjugate-gradient-optimizer riemannian-sgd-optimizer
+         autodiff-sgd-optimizer autodiff-adam-optimizer
+         optimizer? optimizer-kind optimizer-params optimizer-minimize)
+
+(define learn-optimizer-tag 'learn-optimizer)
+
+(define (learn-make-optimizer kind params)
+  (vector learn-optimizer-tag kind params))
+
+(define (optimizer? opt)
+  (and (vector? opt)
+       (>= (vector-length opt) 3)
+       (eq? (vector-ref opt 0) learn-optimizer-tag)))
+
+(define (optimizer-kind opt) (vector-ref opt 1))
+(define (optimizer-params opt) (vector-ref opt 2))
+
+(define (sgd-optimizer . opts)
+  (learn-make-optimizer
+   'sgd
+   (list (learn-pair ':lr (learn-option opts ':lr 0.01))
+         (learn-pair ':max-iter (learn-option opts ':max-iter 1000))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001)))))
+
+(define (adam-optimizer . opts)
+  (learn-make-optimizer
+   'adam
+   (list (learn-pair ':lr (learn-option opts ':lr 0.001))
+         (learn-pair ':beta1 (learn-option opts ':beta1 0.9))
+         (learn-pair ':beta2 (learn-option opts ':beta2 0.999))
+         (learn-pair ':max-iter (learn-option opts ':max-iter 1000))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001)))))
+
+(define (lbfgs-optimizer . opts)
+  (learn-make-optimizer
+   'lbfgs
+   (list (learn-pair ':max-iter (learn-option opts ':max-iter 200))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001))
+         (learn-pair ':history-size (learn-option opts ':history-size 10)))))
+
+(define (conjugate-gradient-optimizer . opts)
+  (learn-make-optimizer
+   'conjugate-gradient
+   (list (learn-pair ':max-iter (learn-option opts ':max-iter 200))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001))
+         (learn-pair ':restart (learn-option opts ':restart #f)))))
+
+(define (riemannian-sgd-optimizer space . opts)
+  (learn-make-optimizer
+   'riemannian-sgd
+   (list (learn-pair ':space space)
+         (learn-pair ':lr (learn-option opts ':lr 0.01))
+         (learn-pair ':max-iter (learn-option opts ':max-iter 1000))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001))
+         (learn-pair ':eps (learn-option opts ':eps 0.000001)))))
+
+(define (autodiff-sgd-optimizer . opts)
+  (learn-make-optimizer
+   'autodiff-sgd
+   (list (learn-pair ':lr (learn-option opts ':lr 0.01))
+         (learn-pair ':max-iter (learn-option opts ':max-iter 1000))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001)))))
+
+(define (autodiff-adam-optimizer . opts)
+  (learn-make-optimizer
+   'autodiff-adam
+   (list (learn-pair ':lr (learn-option opts ':lr 0.001))
+         (learn-pair ':beta1 (learn-option opts ':beta1 0.9))
+         (learn-pair ':beta2 (learn-option opts ':beta2 0.999))
+         (learn-pair ':epsilon (learn-option opts ':epsilon 0.00000001))
+         (learn-pair ':max-iter (learn-option opts ':max-iter 1000))
+         (learn-pair ':tol (learn-option opts ':tol 0.00000001)))))
+
+(define (learn-vector-with-delta x idx delta)
+  (let* ((n (vector-length x))
+         (out (learn-vector-copy x)))
+    (vector-set! out idx (+ (vector-ref x idx) delta))
+    out))
+
+(define (learn-fd-gradient-loop objective x eps grad i n)
+  (if (>= i n)
+      grad
+      (let* ((x-plus (learn-vector-with-delta x i eps))
+             (x-minus (learn-vector-with-delta x i (- eps)))
+             (g (/ (- (objective x-plus) (objective x-minus))
+                   (* 2.0 eps))))
+        (vector-set! grad i g)
+        (learn-fd-gradient-loop objective x eps grad (+ i 1) n))))
+
+(define (learn-fd-gradient objective x eps)
+  (let* ((n (vector-length x))
+         (grad (make-vector n 0.0)))
+    (learn-fd-gradient-loop objective x eps grad 0 n)))
+
+(define (learn-fd-step-loop x grad lr out i n)
+  (if (>= i n)
+      out
+      (begin
+        (vector-set! out i (- (vector-ref x i) (* lr (vector-ref grad i))))
+        (learn-fd-step-loop x grad lr out (+ i 1) n))))
+
+(define (learn-fd-step x grad lr)
+  (let* ((n (vector-length x))
+         (out (make-vector n 0.0)))
+    (learn-fd-step-loop x grad lr out 0 n)))
+
+(define (learn-fd-gradient-norm grad)
+  (sqrt (learn-dot (learn-seq->list grad) (learn-seq->list grad))))
+
+(define (learn-fd-minimize-loop objective x lr max-iter tol eps iter)
+  (if (>= iter max-iter)
+      x
+      (let* ((grad (learn-fd-gradient objective x eps))
+             (norm (learn-fd-gradient-norm grad)))
+        (if (< norm tol)
+            x
+            (learn-fd-minimize-loop objective
+                                    (learn-fd-step x grad lr)
+                                    lr
+                                    max-iter
+                                    tol
+                                    eps
+                                    (+ iter 1))))))
+
+(define (learn-fd-minimize objective x0 lr max-iter tol eps)
+  (learn-fd-minimize-loop objective
+                          (learn-vector-copy x0)
+                          lr
+                          max-iter
+                          tol
+                          eps
+                          0))
+
+(define (learn-riemannian-fd-minimize-loop objective space x lr max-iter tol eps iter)
+  (if (>= iter max-iter)
+      x
+      (let* ((grad (learn-fd-gradient objective x eps))
+             (rgrad (riemannian-gradient space x grad))
+             (norm (learn-fd-gradient-norm rgrad)))
+        (if (< norm tol)
+            x
+            (learn-riemannian-fd-minimize-loop
+             objective
+             space
+             (riemannian-step space x grad lr)
+             lr
+             max-iter
+             tol
+             eps
+             (+ iter 1))))))
+
+(define (learn-riemannian-fd-minimize objective space x0 lr max-iter tol eps)
+  (learn-riemannian-fd-minimize-loop objective
+                                    space
+                                    (riemannian-project space x0)
+                                    lr
+                                    max-iter
+                                    tol
+                                    eps
+                                    0))
+
+(define (learn-autodiff-minimize objective x0 lr max-iter tol)
+  (letrec ((loop (lambda (x iter)
+                   (if (>= iter max-iter)
+                       x
+                       (let* ((grad (gradient objective x))
+                              (norm (learn-fd-gradient-norm grad)))
+                         (if (< norm tol)
+                             x
+                             (loop (learn-fd-step x grad lr)
+                                   (+ iter 1))))))))
+    (loop (learn-vector-copy x0) 0)))
+
+(define (learn-vector-square-loop v out i n)
+  (if (>= i n)
+      out
+      (begin
+        (vector-set! out i (* (vector-ref v i) (vector-ref v i)))
+        (learn-vector-square-loop v out (+ i 1) n))))
+
+(define (learn-vector-square v)
+  (let* ((n (vector-length v))
+         (out (make-vector n 0.0)))
+    (learn-vector-square-loop v out 0 n)))
+
+(define (learn-adam-update-loop x mhat vhat lr eps out i n)
+  (if (>= i n)
+      out
+      (begin
+        (vector-set! out
+                     i
+                     (- (vector-ref x i)
+                        (* lr
+                           (/ (vector-ref mhat i)
+                              (+ (sqrt (vector-ref vhat i)) eps)))))
+        (learn-adam-update-loop x mhat vhat lr eps out (+ i 1) n))))
+
+(define (learn-adam-update x mhat vhat lr eps)
+  (let* ((n (vector-length x))
+         (out (make-vector n 0.0)))
+    (learn-adam-update-loop x mhat vhat lr eps out 0 n)))
+
+(define (learn-autodiff-adam objective x0 lr beta1 beta2 eps max-iter tol)
+  (let ((start (learn-vector-copy x0)))
+    (letrec ((loop (lambda (x m v iter)
+                     (if (>= iter max-iter)
+                         x
+                         (let* ((grad (gradient objective x))
+                                (norm (learn-fd-gradient-norm grad)))
+                           (if (< norm tol)
+                               x
+                               (let* ((t (+ iter 1))
+                                      (m-new (learn-vector-add
+                                              (learn-vector-scale beta1 m)
+                                              (learn-vector-scale (- 1.0 beta1) grad)))
+                                      (v-new (learn-vector-add
+                                              (learn-vector-scale beta2 v)
+                                              (learn-vector-scale
+                                               (- 1.0 beta2)
+                                               (learn-vector-square grad))))
+                                      (mhat (learn-vector-scale
+                                             (/ 1.0 (- 1.0 (expt beta1 t)))
+                                             m-new))
+                                      (vhat (learn-vector-scale
+                                             (/ 1.0 (- 1.0 (expt beta2 t)))
+                                             v-new))
+                                      (x-new (learn-adam-update x mhat vhat lr eps)))
+                                 (loop x-new m-new v-new (+ iter 1)))))))))
+      (loop start
+            (learn-zeros-vector (vector-length start))
+            (learn-zeros-vector (vector-length start))
+            0))))
+
+(define (optimizer-minimize opt objective x0)
+  (let ((kind (optimizer-kind opt))
+        (p (optimizer-params opt)))
+    (cond
+      ((equal? kind 'sgd)
+       (learn-fd-minimize objective x0
+                          (learn-alist-get p ':lr 0.01)
+                          (learn-alist-get p ':max-iter 1000)
+                          (learn-alist-get p ':tol 0.00000001)
+                          (learn-alist-get p ':eps 0.000001)))
+      ((equal? kind 'adam)
+       (learn-fd-minimize objective x0
+                          (learn-alist-get p ':lr 0.001)
+                          (learn-alist-get p ':max-iter 1000)
+                          (learn-alist-get p ':tol 0.00000001)
+                          (learn-alist-get p ':eps 0.000001)))
+      ((equal? kind 'lbfgs)
+       (learn-fd-minimize objective x0
+                          0.01
+                          (learn-alist-get p ':max-iter 200)
+                          (learn-alist-get p ':tol 0.00000001)
+                          (learn-alist-get p ':eps 0.000001)))
+      ((equal? kind 'conjugate-gradient)
+       (learn-fd-minimize objective x0
+                          0.01
+                          (learn-alist-get p ':max-iter 200)
+                          (learn-alist-get p ':tol 0.00000001)
+                          (learn-alist-get p ':eps 0.000001)))
+      ((equal? kind 'riemannian-sgd)
+       (learn-riemannian-fd-minimize objective
+                                     (learn-alist-get p ':space #f)
+                                     x0
+                                     (learn-alist-get p ':lr 0.01)
+                                     (learn-alist-get p ':max-iter 1000)
+                                     (learn-alist-get p ':tol 0.00000001)
+                                     (learn-alist-get p ':eps 0.000001)))
+      ((equal? kind 'autodiff-sgd)
+       (learn-autodiff-minimize objective
+                                x0
+                                (learn-alist-get p ':lr 0.01)
+                                (learn-alist-get p ':max-iter 1000)
+                                (learn-alist-get p ':tol 0.00000001)))
+      ((equal? kind 'autodiff-adam)
+       (learn-autodiff-adam objective
+                            x0
+                            (learn-alist-get p ':lr 0.001)
+                            (learn-alist-get p ':beta1 0.9)
+                            (learn-alist-get p ':beta2 0.999)
+                            (learn-alist-get p ':epsilon 0.00000001)
+                            (learn-alist-get p ':max-iter 1000)
+                            (learn-alist-get p ':tol 0.00000001)))
+      (else
+       (error "learn: unknown optimizer" kind)))))

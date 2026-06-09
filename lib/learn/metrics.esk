@@ -1,0 +1,243 @@
+;;; learn/metrics.esk
+;;;
+;;; Classification, regression, and training-diagnostic metrics.
+
+(require learn.core)
+
+(provide accuracy precision recall f1 confusion-matrix log-loss
+         top-k-accuracy mse rmse mae r2-score
+         loss-history gradient-norm-history learning-curve
+         score-report)
+
+(define (learn-metric-div num den)
+  (if (= den 0) 0.0 (/ num den)))
+
+(define (accuracy y-true y-pred)
+  (let ((yt (learn-seq->list y-true))
+        (yp (learn-seq->list y-pred)))
+    (learn-metric-div
+     (learn-count (lambda (pair)
+                    (equal? (car pair) (car (cdr pair))))
+                  (learn-zip yt yp))
+     (length yt))))
+
+(define (learn-labels y-true y-pred)
+  (learn-unique (append (learn-seq->list y-true)
+                        (learn-seq->list y-pred))))
+
+(define (learn-tp label yt yp)
+  (learn-count (lambda (pair)
+                 (and (equal? (car pair) label)
+                      (equal? (car (cdr pair)) label)))
+               (learn-zip yt yp)))
+
+(define (learn-fp label yt yp)
+  (learn-count (lambda (pair)
+                 (and (not (equal? (car pair) label))
+                      (equal? (car (cdr pair)) label)))
+               (learn-zip yt yp)))
+
+(define (learn-fn label yt yp)
+  (learn-count (lambda (pair)
+                 (and (equal? (car pair) label)
+                      (not (equal? (car (cdr pair)) label))))
+               (learn-zip yt yp)))
+
+(define (learn-precision-label label yt yp)
+  (let ((tp (learn-tp label yt yp))
+        (fp (learn-fp label yt yp)))
+    (learn-metric-div tp (+ tp fp))))
+
+(define (learn-recall-label label yt yp)
+  (let ((tp (learn-tp label yt yp))
+        (fn (learn-fn label yt yp)))
+    (learn-metric-div tp (+ tp fn))))
+
+(define (learn-macro-average values)
+  (if (null? values) 0.0 (learn-list-mean values)))
+
+(define (precision y-true y-pred . opts)
+  (let ((yt (learn-seq->list y-true))
+        (yp (learn-seq->list y-pred))
+        (label (learn-option opts ':label #f)))
+    (if label
+        (learn-precision-label label yt yp)
+        (learn-macro-average
+         (map (lambda (lbl) (learn-precision-label lbl yt yp))
+              (learn-labels yt yp))))))
+
+(define (recall y-true y-pred . opts)
+  (let ((yt (learn-seq->list y-true))
+        (yp (learn-seq->list y-pred))
+        (label (learn-option opts ':label #f)))
+    (if label
+        (learn-recall-label label yt yp)
+        (learn-macro-average
+         (map (lambda (lbl) (learn-recall-label lbl yt yp))
+              (learn-labels yt yp))))))
+
+(define (f1 y-true y-pred . opts)
+  (let ((p (apply precision (cons y-true (cons y-pred opts))))
+        (r (apply recall (cons y-true (cons y-pred opts)))))
+    (if (= (+ p r) 0.0)
+        0.0
+        (/ (* 2.0 p r) (+ p r)))))
+
+(define (learn-zero-row n)
+  (if (<= n 0) '() (cons 0 (learn-zero-row (- n 1)))))
+
+(define (learn-zero-matrix n)
+  (if (<= n 0) '() (cons (learn-zero-row n) (learn-zero-matrix (- n 1)))))
+
+(define (learn-matrix-inc-row row j)
+  (cond
+    ((null? row) '())
+    ((= j 0) (cons (+ (car row) 1) (cdr row)))
+    (else (cons (car row) (learn-matrix-inc-row (cdr row) (- j 1))))))
+
+(define (learn-matrix-inc matrix i j)
+  (cond
+    ((null? matrix) '())
+    ((= i 0) (cons (learn-matrix-inc-row (car matrix) j) (cdr matrix)))
+    (else (cons (car matrix) (learn-matrix-inc (cdr matrix) (- i 1) j)))))
+
+(define (learn-confusion-fill pairs labels matrix)
+  (if (null? pairs)
+      matrix
+      (let* ((actual (car (car pairs)))
+             (pred (car (cdr (car pairs))))
+             (i (learn-list-index-of labels actual 0))
+             (j (learn-list-index-of labels pred 0)))
+        (learn-confusion-fill (cdr pairs)
+                              labels
+                              (learn-matrix-inc matrix i j)))))
+
+(define (confusion-matrix y-true y-pred)
+  (let* ((yt (learn-seq->list y-true))
+         (yp (learn-seq->list y-pred))
+         (labels (learn-labels yt yp))
+         (matrix (learn-zero-matrix (length labels))))
+    (list labels (learn-confusion-fill (learn-zip yt yp) labels matrix))))
+
+(define (learn-clamp-prob p)
+  (cond
+    ((< p 0.000000001) 0.000000001)
+    ((> p 0.999999999) 0.999999999)
+    (else p)))
+
+(define (learn-prob-for actual pred labels)
+  (cond
+    ((number? pred)
+     (if (or (equal? actual 1) (equal? actual #t))
+         pred
+         (- 1.0 pred)))
+    ((pair? pred)
+     (let ((idx (learn-list-index-of labels actual 0)))
+       (if (< idx 0) 0.000000001 (list-ref pred idx))))
+    ((vector? pred)
+     (let ((idx (learn-list-index-of labels actual 0)))
+       (if (< idx 0) 0.000000001 (vector-ref pred idx))))
+    (else 0.000000001)))
+
+(define (log-loss y-true y-prob . opts)
+  (let* ((yt (learn-seq->list y-true))
+         (yp (learn-seq->list y-prob))
+         (labels (learn-option opts ':labels (learn-unique yt))))
+    (if (null? yt)
+        0.0
+        (/ (learn-list-sum
+            (learn-map2
+             (lambda (actual pred)
+               (- (log (learn-clamp-prob
+                        (learn-prob-for actual pred labels)))))
+             yt yp))
+           (length yt)))))
+
+(define (learn-top-k-indices values k)
+  (letrec ((loop (lambda (remaining chosen)
+                   (if (or (<= k (length chosen)) (null? remaining))
+                       chosen
+                       (let* ((best (learn-argmax remaining))
+                              (best-val (list-ref remaining best)))
+                         (loop (learn-map2
+                                (lambda (v i)
+                                  (if (= i best) -999999999.0 v))
+                                remaining
+                                (learn-range (length remaining)))
+                               (cons best chosen)))))))
+    (loop values '())))
+
+(define (top-k-accuracy y-true y-prob k . opts)
+  (let* ((yt (learn-seq->list y-true))
+         (yp (learn-seq->list y-prob))
+         (labels (learn-option opts ':labels (learn-unique yt))))
+    (learn-metric-div
+     (learn-count
+      (lambda (pair)
+        (let* ((actual (car pair))
+               (pred (car (cdr pair)))
+               (probs (learn-seq->list pred))
+               (actual-idx (learn-list-index-of labels actual 0)))
+          (member actual-idx (learn-top-k-indices probs k))))
+      (learn-zip yt yp))
+     (length yt))))
+
+(define (mse y-true y-pred)
+  (let ((yt (learn-seq->list y-true))
+        (yp (learn-seq->list y-pred)))
+    (if (null? yt)
+        0.0
+        (/ (learn-list-sum
+            (learn-map2 (lambda (a b) (* (- a b) (- a b))) yt yp))
+           (length yt)))))
+
+(define (rmse y-true y-pred)
+  (sqrt (mse y-true y-pred)))
+
+(define (mae y-true y-pred)
+  (let ((yt (learn-seq->list y-true))
+        (yp (learn-seq->list y-pred)))
+    (if (null? yt)
+        0.0
+        (/ (learn-list-sum
+            (learn-map2 (lambda (a b) (abs (- a b))) yt yp))
+           (length yt)))))
+
+(define (r2-score y-true y-pred)
+  (let* ((yt (learn-seq->list y-true))
+         (yp (learn-seq->list y-pred))
+         (mu (learn-list-mean yt))
+         (ss-res (learn-list-sum
+                  (learn-map2 (lambda (a b) (* (- a b) (- a b))) yt yp)))
+         (ss-tot (learn-list-sum
+                  (map (lambda (a) (* (- a mu) (- a mu))) yt))))
+    (if (= ss-tot 0.0) 0.0 (- 1.0 (/ ss-res ss-tot)))))
+
+(define (learn-history-field hist key)
+  (if (null? hist)
+      '()
+      (cons (learn-alist-get (car hist) key #f)
+            (learn-history-field (cdr hist) key))))
+
+(define (loss-history training-result)
+  (learn-history-field (training-result-history training-result) 'loss))
+
+(define (gradient-norm-history training-result)
+  (learn-history-field (training-result-history training-result) 'gradient-norm))
+
+(define (learning-curve training-result . opts)
+  (let ((metric (learn-option opts ':metric 'loss)))
+    (learn-history-field (training-result-history training-result) metric)))
+
+(define (score-report y-true y-pred . opts)
+  (let ((task (learn-option opts ':task 'classification)))
+    (if (equal? task 'regression)
+        (list (learn-pair 'mse (mse y-true y-pred))
+              (learn-pair 'rmse (rmse y-true y-pred))
+              (learn-pair 'mae (mae y-true y-pred))
+              (learn-pair 'r2 (r2-score y-true y-pred)))
+        (list (learn-pair 'accuracy (accuracy y-true y-pred))
+              (learn-pair 'precision (precision y-true y-pred))
+              (learn-pair 'recall (recall y-true y-pred))
+              (learn-pair 'f1 (f1 y-true y-pred))
+              (learn-pair 'confusion-matrix (confusion-matrix y-true y-pred)))))))

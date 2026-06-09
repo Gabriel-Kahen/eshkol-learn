@@ -1,0 +1,49 @@
+(require learn)
+
+(define (learn-benchmark-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+(define bench-ds
+  (csv-dataset "fixtures/learn_benchmark_tabular.csv"
+               '("x1" "x2" "x3")
+               "label"))
+
+(define bench-diagnostics (validate-dataset bench-ds ':features 3))
+(learn-benchmark-assert "benchmark samples"
+                        (= (learn-alist-get bench-diagnostics 'samples 0) 12))
+(learn-benchmark-assert "benchmark shape"
+                        (equal? (learn-alist-get bench-diagnostics 'x-shape '())
+                                '(12 3)))
+
+(define bench-x (dataset-x bench-ds))
+(define bench-y (dataset-y bench-ds))
+(define split-a
+  (train-valid-test-split bench-x bench-y
+                          ':valid-ratio 0.25
+                          ':test-ratio 0.25
+                          ':seed 123))
+(define split-b
+  (train-valid-test-split bench-x bench-y
+                          ':valid-ratio 0.25
+                          ':test-ratio 0.25
+                          ':seed 123))
+(learn-benchmark-assert "seeded split is deterministic"
+                        (equal? split-a split-b))
+
+(define bench-model-a (logistic-regressor ':lr 0.2 ':epochs 300))
+(define bench-model-b (logistic-regressor ':lr 0.2 ':epochs 300))
+(fit bench-model-a (car split-a) (car (cdr split-a)))
+(fit bench-model-b (car split-b) (car (cdr split-b)))
+
+(define bench-pred-a (predict bench-model-a bench-x))
+(define bench-pred-b (predict bench-model-b bench-x))
+(define bench-score (score bench-model-a bench-x bench-y))
+
+(learn-benchmark-assert "model predictions are deterministic"
+                        (equal? bench-pred-a bench-pred-b))
+(learn-benchmark-assert "benchmark score is useful"
+                        (>= bench-score 0.8))
+
+(display "deterministic benchmark fixture ... OK") (newline)

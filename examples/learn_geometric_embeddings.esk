@@ -1,0 +1,41 @@
+(require learn)
+
+(define hyperbolic (hyperbolic-space 2))
+(define spherical (spherical-space 2))
+(define euclidean (euclidean-space 1))
+
+(define concept-embeddings
+  '((0.05 0.10)
+    (0.20 0.10)
+    (0.40 0.20)))
+
+(define direction-embeddings
+  '((1.0 0.0)
+    (0.0 1.0)
+    (-1.0 0.0)))
+
+(define mixed-layout
+  (list hyperbolic spherical euclidean))
+
+(define mixed-a '(0.05 0.10 1.0 0.0 0.25))
+(define mixed-b '(0.20 0.10 0.0 1.0 0.75))
+
+(display "hyperbolic summary: ")
+(display (geometry-summary hyperbolic concept-embeddings))
+(newline)
+
+(display "spherical distance: ")
+(display (geometry-distance spherical '(1.0 0.0) '(0.0 1.0)))
+(newline)
+
+(display "mixed geometry summary: ")
+(display (mixed-geometry-summary mixed-layout (list mixed-a mixed-b)))
+(newline)
+
+(display "mixed geometry distance: ")
+(display (mixed-geometry-distance mixed-layout mixed-a mixed-b))
+(newline)
+
+(display "spherical regularization: ")
+(display (geometric-regularization spherical direction-embeddings))
+(newline)
