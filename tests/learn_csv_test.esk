@@ -1,0 +1,37 @@
+(require learn)
+
+(define (learn-csv-assert label ok?)
+  (if ok?
+      #t
+      (error label "assertion failed")))
+
+;; Resolve names from the header and preserve every typed row in file order.
+(define csv-ds
+  (csv-dataset "fixtures/tiny_classification.csv"
+               '("x1" "x2")
+               "label"))
+
+(learn-csv-assert "CSV sample count" (= (dataset-size csv-ds) 6))
+(learn-csv-assert "CSV numeric features in file order"
+                  (equal? (dataset-x csv-ds)
+                          '((0.0 0.0) (0.0 1.0) (1.0 0.0)
+                            (1.0 1.0) (2.0 2.0) (0.2 0.1))))
+(learn-csv-assert "CSV string targets stay aligned"
+                  (equal? (dataset-y csv-ds)
+                          '("no" "yes" "yes" "yes" "yes" "no")))
+
+;; Feature order follows the requested names, while numeric targets stay typed.
+(define csv-reordered-ds
+  (csv-dataset "fixtures/tiny_classification.csv"
+               '("x2" "x1")
+               "x1"))
+
+(learn-csv-assert "CSV requested feature order"
+                  (equal? (dataset-x csv-reordered-ds)
+                          '((0.0 0.0) (1.0 0.0) (0.0 1.0)
+                            (1.0 1.0) (2.0 2.0) (0.1 0.2))))
+(learn-csv-assert "CSV numeric targets in file order"
+                  (equal? (dataset-y csv-reordered-ds)
+                          '(0.0 0.0 1.0 1.0 2.0 0.2)))
+
+(display "CSV header, row order, and type inference ... OK") (newline)
