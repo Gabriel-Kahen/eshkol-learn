@@ -3,7 +3,6 @@
 ;;; Dataset wrappers, deterministic splits, batching, and CSV adapters.
 
 (require learn.core)
-(require core.data.csv)
 (require core.data.dataframe)
 
 (provide train-valid-test-split shuffle-split k-fold-split batch-dataset
@@ -273,37 +272,7 @@
          (y (csv-column df target-col)))
     (list x y)))
 
-(define (learn-try-parse-number str)
-  (if (or (null? str) (not (string? str)) (string=? str ""))
-      #f
-      (let ((n (string->number str)))
-        (if (eq? n #f) #f n))))
-
-(define (learn-csv-infer-field val)
-  (if (null? val)
-      val
-      (let ((n (learn-try-parse-number val)))
-        (if (eq? n #f) val n))))
-
-(define (learn-csv-infer-row row)
-  (if (null? row)
-      '()
-      (cons (learn-csv-infer-field (car row))
-            (learn-csv-infer-row (cdr row)))))
-
-(define (learn-csv-infer-rows rows)
-  (if (null? rows)
-      '()
-      (cons (learn-csv-infer-row (car rows))
-            (learn-csv-infer-rows (cdr rows)))))
-
-(define (learn-csv-parse-typed str)
-  (let ((rows (reverse (csv-parse str))))
-    (if (null? rows)
-        (cons '() '())
-        (cons (car rows) (learn-csv-infer-rows (cdr rows))))))
-
 (define (csv-dataset filename feature-cols target-col)
-  (let* ((df (learn-csv-parse-typed (read-file filename)))
+  (let* ((df (csv-parse-typed (read-file filename)))
          (xy (dataframe->xy df feature-cols target-col)))
     (tensor-dataset (car xy) (car (cdr xy)))))
